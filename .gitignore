@@ -1,0 +1,17 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+# Never commit Garmin credentials or token stores.
+.garminconnect/
+garmin_tokens.json
+oauth*_token.json
+

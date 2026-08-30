@@ -1,0 +1,116 @@
+{
+  "manifest_version": "0.4",
+  "name": "garmin-owl",
+  "display_name": "Garmin Owl",
+  "version": "0.1.0",
+  "description": "Local-only, read-only access to your Garmin Connect health and activity data.",
+  "long_description": "Garmin Owl runs entirely as a local stdio MCP server. It reads your existing Garmin Connect data on demand through the unofficial python-garminconnect client. It has no write tools, public listener, telemetry, analytics, remote database, or bundled credentials. Garmin session tokens remain in the standard local ~/.garminconnect store.",
+  "author": {
+    "name": "garmin-owl contributors"
+  },
+  "server": {
+    "type": "uv",
+    "entry_point": "src/garmin_owl/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "${__dirname}",
+        "run",
+        "garmin-owl"
+      ],
+      "env": {}
+    }
+  },
+  "tools": [
+    {
+      "name": "get_daily_summary",
+      "description": "Read a concise Garmin daily summary."
+    },
+    {
+      "name": "get_sleep",
+      "description": "Read Garmin-recorded sleep metrics."
+    },
+    {
+      "name": "get_hrv",
+      "description": "Read Garmin HRV status and nightly values."
+    },
+    {
+      "name": "get_recovery",
+      "description": "Read a combined summary of Garmin-provided recovery metrics without a derived score."
+    },
+    {
+      "name": "get_training_readiness",
+      "description": "Read Garmin training readiness and available components."
+    },
+    {
+      "name": "get_body_battery",
+      "description": "Read Garmin Body Battery metrics and an optional capped time series."
+    },
+    {
+      "name": "get_stress",
+      "description": "Read Garmin stress metrics and an optional capped time series."
+    },
+    {
+      "name": "get_activities",
+      "description": "Read a concise list of Garmin activities."
+    },
+    {
+      "name": "get_activity",
+      "description": "Read details for one Garmin activity without location tracks or raw streams."
+    },
+    {
+      "name": "get_body_composition",
+      "description": "Read Garmin weight and body-composition data."
+    },
+    {
+      "name": "get_training_context",
+      "description": "Read recovery, recent training, and transparent seven-day comparisons."
+    },
+    {
+      "name": "get_recovery_trend",
+      "description": "Read a normalized 7, 14, or 28-day recovery trend."
+    },
+    {
+      "name": "get_training_week",
+      "description": "Summarize one ISO training week from normalized activities."
+    },
+    {
+      "name": "get_training_load",
+      "description": "Read Garmin training load/status aggregates when supported."
+    },
+    {
+      "name": "get_recent_activities",
+      "description": "Read bounded, optionally type-filtered recent activities."
+    },
+    {
+      "name": "compare_activities",
+      "description": "Compare 2-10 activities using concise normalized metrics."
+    },
+    {
+      "name": "get_cycle",
+      "description": "Read normalized cycle phase and timing without notes, symptoms, or raw daily logs."
+    }
+  ],
+  "tools_generated": false,
+  "keywords": [
+    "garmin",
+    "health",
+    "fitness",
+    "activities",
+    "local",
+    "read-only"
+  ],
+  "license": "MIT",
+  "privacy_policies": [
+    "https://www.garmin.com/en-US/privacy/connect/"
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin"
+    ],
+    "runtimes": {
+      "python": ">=3.12,<4"
+    }
+  }
+}
