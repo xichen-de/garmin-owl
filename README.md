@@ -17,6 +17,10 @@ uv run garmin-owl-auth
 
 Authentication happens in your terminal: you'll be prompted for your Garmin email, password, and (if your account has it enabled) an MFA code. The MCP server never asks the model for any of these. Nothing but a reusable session token is saved, by `python-garminconnect`, to `~/.garminconnect` (override with the `GARMINTOKENS` environment variable). Re-run `uv run garmin-owl-auth` any time to check whether the saved tokens are still valid — it re-authenticates only if they aren't.
 
+#### Why does this ask for my Garmin password?
+
+Garmin has no public OAuth login for personal Garmin Connect data — the kind of "Sign in with Garmin" redirect flow you'd get from Google or GitHub simply doesn't exist for individual accounts. Garmin's only OAuth API (the Connect Developer Program) is gated behind a business partnership agreement, not available to a personal script. So `garmin-owl`, like every other open-source tool that reads personal Garmin data, authenticates the same way the official Garmin Connect app and website do internally: your email and password go directly to Garmin's own login endpoint (`sso.garmin.com`) in exchange for session tokens, and only those tokens are stored locally. Your credentials are typed once in your own terminal, held only in memory for that one login call, and never logged, written to disk, or sent to anything other than Garmin's own servers — in particular, they never reach the MCP client or the model. See [Privacy and safety](#privacy-and-safety) for what is stored and where.
+
 ## Install in Claude Desktop
 
 1. Authenticate once with `uv run garmin-owl-auth`.
