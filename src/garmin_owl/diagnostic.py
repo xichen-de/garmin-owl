@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .auth import load_saved_client
+from .client import GarminDataClient, GarminOwlError
 from .normalize import STATUS_PHRASE_KEYS
 from .tools import validate_activity_id
 
@@ -81,7 +82,13 @@ def diagnose_activity(activity_id: int) -> tuple[list[dict[str, Any]], bool]:
 
 def _key_paths(value: Any, prefix: str = "", depth: int = 0) -> list[str]:
     """List mapping key paths only. Values are never read, so nothing private is emitted."""
-    if depth > 4 or not isinstance(value, dict):
+    if depth > 4:
+        return []
+    if isinstance(value, list | tuple):
+        # Only the first element is walked: siblings repeat the same shape, and the goal is
+        # the set of key names, not how many records exist.
+        return _key_paths(value[0], prefix, depth + 1) if value else []
+    if not isinstance(value, dict):
         return []
     paths: list[str] = []
     for key in value:
@@ -120,6 +127,41 @@ def describe_training_status(raw: Any) -> dict[str, Any]:
     }
 
 
+def find_keys(client: GarminDataClient, cdate: str, substring: str) -> list[dict[str, Any]]:
+    """Report which allow-listed Garmin reads carry keys matching ``substring``.
+
+    Key names only -- never values -- so this answers "is this metric reachable through a read
+    garmin-owl is already permitted to make?" without emitting health data.  It deliberately
+    goes through GarminDataClient rather than the raw API, so the probe cannot look anywhere
+    the server itself is not allowed to look.
+    """
+    needle = substring.casefold()
+    reads: tuple[tuple[str, Callable[[], Any]], ...] = (
+        ("daily_summary", lambda: client.daily_summary(cdate)),
+        ("sleep", lambda: client.sleep(cdate)),
+        ("hrv", lambda: client.hrv(cdate)),
+        ("training_readiness", lambda: client.training_readiness(cdate)),
+        ("body_battery", lambda: client.body_battery(cdate)),
+        ("stress", lambda: client.stress(cdate)),
+    )
+    observations: list[dict[str, Any]] = []
+    for name, read in reads:
+        try:
+            paths = _key_paths(read())
+        except GarminOwlError as exc:
+            observations.append(describe_failure(name, exc))
+            continue
+        observations.append(
+            {
+                "endpoint": name,
+                "status": "ok",
+                "key_count": len(paths),
+                "matching_key_paths": sorted(p for p in paths if needle in p.casefold()),
+            }
+        )
+    return observations
+
+
 def diagnose_training_status(cdate: str) -> tuple[dict[str, Any], bool]:
     api = load_saved_client()
     try:
@@ -138,9 +180,18 @@ def main() -> None:
         metavar="YYYY-MM-DD",
         help="report which label keys the training-status payload carries, values excluded",
     )
+    parser.add_argument(
+        "--find-keys",
+        nargs=2,
+        metavar=("YYYY-MM-DD", "SUBSTRING"),
+        help=(
+            "report which allow-listed reads carry key names containing SUBSTRING "
+            "(e.g. 2026-08-31 temp); key names only, never values"
+        ),
+    )
     args = parser.parse_args()
-    if args.activity_id is None and args.training_status is None:
-        parser.error("give an activity_id, --training-status DATE, or both")
+    if args.activity_id is None and args.training_status is None and args.find_keys is None:
+        parser.error("give an activity_id, --training-status DATE, --find-keys DATE SUBSTRING")
     observations: list[dict[str, Any]] = []
     failed = False
     try:
@@ -148,6 +199,9 @@ def main() -> None:
             observation, status_failed = diagnose_training_status(args.training_status)
             observations.append(observation)
             failed = failed or status_failed
+        if args.find_keys is not None:
+            cdate, substring = args.find_keys
+            observations.extend(find_keys(GarminDataClient(), cdate, substring))
         if args.activity_id is not None:
             activity_observations, activity_failed = diagnose_activity(args.activity_id)
             observations.extend(activity_observations)

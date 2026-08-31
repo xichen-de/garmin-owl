@@ -109,3 +109,70 @@ def test_training_status_probe_surfaces_an_unrecognized_label_key() -> None:
     assert result["known_label_keys_present"] == []
     assert "statusDescription" in result["candidate_label_keys"]
     assert "x" not in json.dumps(result)
+
+
+class KeyProbeGarmin:
+    """Only the reads GarminDataClient is allowed to make."""
+
+    def get_user_summary(self, cdate: str) -> dict[str, Any]:
+        return {"totalSteps": 1000, "restingHeartRate": 50}
+
+    def get_sleep_data(self, cdate: str) -> dict[str, Any]:
+        return {
+            "dailySleepDTO": {"sleepTimeSeconds": 28000, "averageSpO2Value": 96},
+            "skinTempDataExists": True,
+            "wellnessEpochSPO2DataDTOList": [{"skinTemperatureCelsius": 33.4}],
+        }
+
+    def get_hrv_data(self, cdate: str) -> dict[str, Any]:
+        return {"hrvSummary": {"weeklyAvg": 55}}
+
+    def get_training_readiness(self, cdate: str) -> list[dict[str, Any]]:
+        return [{"score": 75}]
+
+    def get_body_battery(self, startdate: str, enddate: str | None = None) -> list[Any]:
+        return [{"date": startdate, "charged": 45}]
+
+    def get_stress_data(self, cdate: str) -> dict[str, Any]:
+        return {"avgStressLevel": 25}
+
+
+def test_key_probe_finds_reachable_keys_without_emitting_values() -> None:
+    from garmin_owl.client import GarminDataClient
+    from garmin_owl.diagnostic import find_keys
+
+    observations = find_keys(
+        GarminDataClient(KeyProbeGarmin()),  # type: ignore[arg-type]
+        "2026-08-31",
+        "temp",
+    )
+    by_endpoint = {item["endpoint"]: item for item in observations}
+    assert by_endpoint["sleep"]["matching_key_paths"] == [
+        "skinTempDataExists",
+        "wellnessEpochSPO2DataDTOList.skinTemperatureCelsius",
+    ]
+    assert by_endpoint["hrv"]["matching_key_paths"] == []
+    rendered = json.dumps(observations)
+    for value in ("33.4", "28000", "96", "1000", "50", "75", "45", "25"):
+        assert value not in rendered
+
+
+def test_key_probe_reports_a_failed_read_by_class_only() -> None:
+    from garminconnect import GarminConnectConnectionError
+
+    from garmin_owl.client import GarminDataClient
+    from garmin_owl.diagnostic import find_keys
+
+    class FailingSleep(KeyProbeGarmin):
+        def get_sleep_data(self, cdate: str) -> dict[str, Any]:
+            raise GarminConnectConnectionError("outage at 10.0.0.4")
+
+    observations = find_keys(
+        GarminDataClient(FailingSleep()),  # type: ignore[arg-type]
+        "2026-08-31",
+        "temp",
+    )
+    sleep = next(item for item in observations if item["endpoint"] == "sleep")
+    assert sleep["status"] == "failed"
+    assert sleep["exception_class"] == "GarminOwlUnavailableError"
+    assert "10.0.0.4" not in json.dumps(observations)
