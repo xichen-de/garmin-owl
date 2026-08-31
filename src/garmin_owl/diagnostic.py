@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .auth import load_saved_client
+from .normalize import STATUS_PHRASE_KEYS
 from .tools import validate_activity_id
 
 _ENDPOINTS = (
@@ -78,14 +79,79 @@ def diagnose_activity(activity_id: int) -> tuple[list[dict[str, Any]], bool]:
     return observations, failed
 
 
+def _key_paths(value: Any, prefix: str = "", depth: int = 0) -> list[str]:
+    """List mapping key paths only. Values are never read, so nothing private is emitted."""
+    if depth > 4 or not isinstance(value, dict):
+        return []
+    paths: list[str] = []
+    for key in value:
+        path = f"{prefix}{key}"
+        paths.append(path)
+        paths.extend(_key_paths(value[key], f"{path}.", depth + 1))
+    return paths
+
+
+def describe_training_status(raw: Any) -> dict[str, Any]:
+    """Report which label-bearing keys the training-status payload carries, not their values.
+
+    ``trainingStatus`` is an unlabeled code.  garmin-owl will not guess a code-to-label table,
+    so this reports where a Garmin-supplied label could live, without emitting training data.
+    """
+    paths = _key_paths(raw)
+    return {
+        "endpoint": "get_training_status",
+        "status": "ok",
+        "response_type": type(raw).__name__,
+        "has_training_status_key": any(p.endswith("trainingStatus") for p in paths),
+        "known_label_keys_present": sorted(
+            {key for key in STATUS_PHRASE_KEYS if any(p.endswith(key) for p in paths)}
+        ),
+        # Any other key whose name suggests wording, so an unrecognized label key can be found.
+        "candidate_label_keys": sorted(
+            {
+                p.rsplit(".", 1)[-1]
+                for p in paths
+                if any(
+                    hint in p.rsplit(".", 1)[-1].casefold()
+                    for hint in ("phrase", "label", "key", "feedback", "description")
+                )
+            }
+        ),
+    }
+
+
+def diagnose_training_status(cdate: str) -> tuple[dict[str, Any], bool]:
+    api = load_saved_client()
+    try:
+        return describe_training_status(api.get_training_status(cdate)), False
+    except Exception as exc:  # diagnostic boundary: class only, never message/raw data
+        return describe_failure("get_training_status", exc), True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run redacted, read-only diagnostics for one Garmin activity."
     )
-    parser.add_argument("activity_id", type=int)
+    parser.add_argument("activity_id", type=int, nargs="?")
+    parser.add_argument(
+        "--training-status",
+        metavar="YYYY-MM-DD",
+        help="report which label keys the training-status payload carries, values excluded",
+    )
     args = parser.parse_args()
+    if args.activity_id is None and args.training_status is None:
+        parser.error("give an activity_id, --training-status DATE, or both")
+    observations: list[dict[str, Any]] = []
+    failed = False
     try:
-        observations, failed = diagnose_activity(args.activity_id)
+        if args.training_status is not None:
+            observation, status_failed = diagnose_training_status(args.training_status)
+            observations.append(observation)
+            failed = failed or status_failed
+        if args.activity_id is not None:
+            activity_observations, activity_failed = diagnose_activity(args.activity_id)
+            observations.extend(activity_observations)
+            failed = failed or activity_failed
     except Exception as exc:
         # Authentication/setup failures receive the same no-message treatment.
         print(json.dumps({"status": "setup_failed", "exception_class": type(exc).__name__}))

@@ -103,7 +103,7 @@ def get_training_context(date: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def get_recovery_trend(days: int = 7) -> dict[str, Any]:
-    """Compare today's recovery facts with preceding days, including missing-data metadata."""
+    """Trend sleep, HRV, RHR, readiness, and Body Battery over 7/14/28 days with coverage data."""
     return get_tools().get_recovery_trend(days)
 
 

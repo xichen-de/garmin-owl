@@ -178,9 +178,14 @@ class DailyRecoveryPoint(OwlModel):
     date: str
     sleep_score: int | None = None
     hrv_nightly_average_ms: float | None = None
+    # Garmin's own 7-day rolling HRV mean. Carried for drift reading only; see RecoveryTrend.
+    hrv_weekly_average_ms: float | None = None
     resting_hr_bpm: int | None = None
     training_readiness: int | None = None
     recovery_time_hours: float | None = None
+    # Garmin's whole-day Body Battery totals from the daily summary. Not overnight recharge.
+    body_battery_charged: int | None = None
+    body_battery_drained: int | None = None
 
 
 class TrendMetric(OwlModel):
@@ -206,7 +211,11 @@ class RecoveryTrend(OwlModel):
 
 class TrainingLoad(OwlModel):
     date: str
+    # Garmin's own wording. Absent when Garmin returned only an unlabeled numeric code.
     training_status: str | None = None
+    # The raw Garmin code, kept separate so an opaque number is never shown as a status name.
+    # garmin-owl does not publish a code-to-label mapping it cannot verify.
+    training_status_code: int | None = None
     acute_load: float | None = None
     load_ratio: float | None = None
     vo2_max: float | None = None

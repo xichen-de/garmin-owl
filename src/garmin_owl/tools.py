@@ -424,11 +424,27 @@ class GarminTools:
                 self.sync.ensure_resource(resource, cdate)
         rows = self.database.recovery_rows(start.isoformat(), end.isoformat())
         by_date = {str(row["date"]): row for row in rows}
+        # The installed python-garminconnect models hrvSummary with weeklyAvg and lastNightAvg
+        # and no nightlyAverage, so nightly_avg_ms is null for current accounts. Fall back to
+        # Garmin's lastNightAvg -- the same per-night average under the key Garmin actually
+        # sends -- and record below which source each point came from.
+        fallback_dates = [
+            cdate
+            for cdate in requested
+            if cdate in by_date
+            and by_date[cdate]["nightly_avg_ms"] is None
+            and by_date[cdate]["last_night_avg_ms"] is not None
+        ]
         points = [
             DailyRecoveryPoint(
                 date=cdate,
                 sleep_score=by_date[cdate]["sleep_score"],
-                hrv_nightly_average_ms=by_date[cdate]["nightly_avg_ms"],
+                hrv_nightly_average_ms=(
+                    by_date[cdate]["nightly_avg_ms"]
+                    if by_date[cdate]["nightly_avg_ms"] is not None
+                    else by_date[cdate]["last_night_avg_ms"]
+                ),
+                hrv_weekly_average_ms=by_date[cdate]["weekly_avg_ms"],
                 resting_hr_bpm=by_date[cdate]["resting_hr_bpm"],
                 training_readiness=by_date[cdate]["training_readiness"],
                 recovery_time_hours=(
@@ -436,6 +452,8 @@ class GarminTools:
                     if by_date[cdate]["recovery_time_minutes"] is not None
                     else None
                 ),
+                body_battery_charged=by_date[cdate]["body_battery_charged"],
+                body_battery_drained=by_date[cdate]["body_battery_drained"],
             )
             for cdate in requested
             if cdate in by_date
@@ -450,6 +468,8 @@ class GarminTools:
             ("hrv_nightly_average_ms", "hrv_nightly_average_ms"),
             ("resting_hr_bpm", "resting_hr_bpm"),
             ("training_readiness", "training_readiness"),
+            ("body_battery_charged", "body_battery_charged"),
+            ("body_battery_drained", "body_battery_drained"),
         ):
             samples = [
                 (point.date, float(value))
@@ -498,6 +518,42 @@ class GarminTools:
                         message=f"No preceding {label} values are available for comparison.",
                     )
                 )
+        if fallback_dates:
+            availability.append(
+                AvailabilityNotice(
+                    field="hrv_nightly_average_ms",
+                    status="alternate_garmin_source",
+                    message=(
+                        f"For {len(fallback_dates)} of {len(points)} days Garmin supplied no "
+                        "nightlyAverage, so Garmin's lastNightAvg was used for the same "
+                        "per-night HRV average."
+                    ),
+                )
+            )
+        availability.append(
+            AvailabilityNotice(
+                field="hrv_weekly_average_ms",
+                status="series_only_no_deviation",
+                message=(
+                    "Garmin's weekly HRV average is already a rolling 7-day mean, so it is "
+                    "reported as a series for reading drift but is deliberately given no "
+                    "current-vs-baseline comparison: consecutive values share nights, and a "
+                    "deviation against preceding days would double-count them. Use "
+                    "hrv_nightly_average_ms for deviation."
+                ),
+            )
+        )
+        availability.append(
+            AvailabilityNotice(
+                field="body_battery_charged",
+                status="whole_day_total",
+                message=(
+                    "Garmin's whole-day Body Battery charge and drain totals from the daily "
+                    "summary. These are not an overnight recharge figure; Garmin does not "
+                    "return one, and garmin-owl does not derive it here."
+                ),
+            )
+        )
         return RecoveryTrend(
             days=days,
             points=points,

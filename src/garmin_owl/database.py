@@ -31,12 +31,15 @@ from .models import (
     TrainingReadiness,
 )
 from .notices import (
+    MISSING_OR_UNSUPPORTED,
+    TRAINING_LOAD_SOURCES,
     body_battery_notice,
     cycle_notices,
     unavailable_source_notice,
+    unlabeled_status_notice,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 TODAY_TTL = timedelta(minutes=20)
 # A calendar day keeps changing after midnight: watches and scales upload late, and Garmin
 # recomputes some daily aggregates. Treat a day as settled only at noon the following day, and
@@ -68,8 +71,8 @@ CREATE TABLE IF NOT EXISTS hrv (
 );
 CREATE TABLE IF NOT EXISTS training_status (
   date TEXT PRIMARY KEY, training_status TEXT, acute_load REAL, load_ratio REAL,
-  vo2_max REAL, endurance_score REAL, hill_score REAL, unavailable_sources TEXT,
-  fetched_at TEXT NOT NULL
+  vo2_max REAL, endurance_score REAL, hill_score REAL, training_status_code INTEGER,
+  unavailable_sources TEXT, fetched_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS body_battery (
   date TEXT PRIMARY KEY, charged INTEGER, drained INTEGER, start_level INTEGER,
@@ -127,6 +130,7 @@ CREATE TABLE IF NOT EXISTS cycle_metrics (
 # Columns added after the first release of a table, applied to caches created earlier.
 ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("training_status", "unavailable_sources", "TEXT"),
+    ("training_status", "training_status_code", "INTEGER"),
     ("cycle_metrics", "data_status", "TEXT"),
 )
 
@@ -418,7 +422,11 @@ class GarminDatabase:
         # Availability notices are regenerated on read from the source names, so that a cached
         # row cannot silently lose the record of which Garmin reads were unavailable.
         unavailable = sorted(
-            {notice.field for notice in item.availability if notice.status != "available"}
+            {
+                notice.field
+                for notice in item.availability
+                if notice.status == MISSING_OR_UNSUPPORTED and notice.field in TRAINING_LOAD_SOURCES
+            }
         )
         return self._upsert(
             "training_status",
@@ -436,7 +444,7 @@ class GarminDatabase:
             return None
         data = dict(row)
         unavailable = str(data.pop("unavailable_sources") or "")
-        return TrainingLoad(
+        item = TrainingLoad(
             **data,
             availability=[
                 unavailable_source_notice(source)
@@ -444,6 +452,11 @@ class GarminDatabase:
                 if source
             ],
         )
+        # Rebuilt rather than stored: it is fully determined by the two status columns, and a
+        # cached row must not lose the warning that the code carries no Garmin label.
+        if item.training_status is None and item.training_status_code is not None:
+            item.availability.insert(0, unlabeled_status_notice(item.training_status_code))
+        return item
 
     def put_body_battery(
         self, item: BodyBatterySummary, *, now: datetime | None = None
@@ -719,7 +732,8 @@ class GarminDatabase:
                 "WITH dates AS (SELECT date FROM daily_metrics UNION SELECT date FROM sleep "
                 "UNION SELECT date FROM hrv) "
                 "SELECT dates.date,d.resting_hr_bpm,d.training_readiness,d.recovery_time_minutes,"
-                "s.sleep_score,h.nightly_avg_ms FROM dates "
+                "d.body_battery_charged,d.body_battery_drained,"
+                "s.sleep_score,h.nightly_avg_ms,h.last_night_avg_ms,h.weekly_avg_ms FROM dates "
                 "LEFT JOIN daily_metrics d ON d.date=dates.date "
                 "LEFT JOIN sleep s ON s.date=dates.date LEFT JOIN hrv h ON h.date=dates.date "
                 "WHERE dates.date BETWEEN ? AND ? ORDER BY dates.date",

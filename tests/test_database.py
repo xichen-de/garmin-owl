@@ -12,6 +12,7 @@ from garmin_owl.models import (
     HrvSummary,
     SleepSummary,
 )
+from garmin_owl.normalize import normalize_training_load
 
 
 def test_schema_version_permissions_and_no_sensitive_columns(tmp_path: Path) -> None:
@@ -169,3 +170,28 @@ def test_schema_one_cache_migrates_to_cycle_schema(tmp_path: Path) -> None:
             ).fetchone()
             is not None
         )
+
+
+def test_cached_training_load_keeps_the_unlabeled_code_warning(tmp_path: Path) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    item = normalize_training_load({"trainingStatus": 7}, None, None, None, "2026-01-01")
+    database.put_training_load(item)
+    cached = database.get_training_load("2026-01-01")
+    assert cached is not None
+    assert cached.training_status_code == 7
+    assert cached.training_status is None
+    assert [notice.status for notice in cached.availability] == ["code_without_label"]
+
+
+def test_unlabeled_status_is_not_recorded_as_an_unavailable_source(tmp_path: Path) -> None:
+    """Only genuinely missing upstream reads belong in unavailable_sources."""
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    item = normalize_training_load(
+        {"trainingStatus": 7}, None, None, None, "2026-01-01", ["hill_score"]
+    )
+    database.put_training_load(item)
+    with database.connect() as connection:
+        stored = connection.execute(
+            "SELECT unavailable_sources FROM training_status WHERE date='2026-01-01'"
+        ).fetchone()[0]
+    assert stored == "hill_score"

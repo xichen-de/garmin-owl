@@ -1,9 +1,10 @@
+import json
 from typing import Any
 
 import pytest
 
 import garmin_owl.diagnostic as diagnostic
-from garmin_owl.diagnostic import describe_failure, describe_success
+from garmin_owl.diagnostic import describe_failure, describe_success, describe_training_status
 
 
 def test_diagnostic_describes_shape_without_values() -> None:
@@ -79,3 +80,32 @@ def test_diagnostic_identifies_individual_endpoint_failure(
         },
     ]
     assert "private upstream detail" not in repr(observations)
+
+
+def test_training_status_probe_reports_key_names_only() -> None:
+    """The probe must locate a label key without emitting any training data."""
+    raw = {
+        "mostRecentTrainingStatus": {
+            "latestTrainingStatusData": {
+                "3442": {
+                    "trainingStatus": 7,
+                    "trainingStatusFeedbackPhrase": "UNPRODUCTIVE_1",
+                    "weeklyTrainingLoad": 812,
+                }
+            }
+        }
+    }
+    result = describe_training_status(raw)
+    assert result["has_training_status_key"] is True
+    assert result["known_label_keys_present"] == ["trainingStatusFeedbackPhrase"]
+    assert "trainingStatusFeedbackPhrase" in result["candidate_label_keys"]
+    rendered = json.dumps(result)
+    for value in ("UNPRODUCTIVE_1", "812", "3442"):
+        assert value not in rendered
+
+
+def test_training_status_probe_surfaces_an_unrecognized_label_key() -> None:
+    result = describe_training_status({"trainingStatus": 7, "statusDescription": "x"})
+    assert result["known_label_keys_present"] == []
+    assert "statusDescription" in result["candidate_label_keys"]
+    assert "x" not in json.dumps(result)

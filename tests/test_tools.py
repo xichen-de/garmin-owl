@@ -489,3 +489,89 @@ def test_undated_activities_use_the_same_window_with_and_without_the_cache(
     expected = ((today - timedelta(days=13)).isoformat(), today.isoformat())
     assert uncached == [expected]
     assert fake.date_arguments == [expected]
+
+
+def _seed_recovery_days(database: GarminDatabase, days: int = 7) -> None:
+    for day in range(1, days + 1):
+        cdate = f"2026-01-{day:02d}"
+        database.put_daily(
+            DailySummary(
+                date=cdate,
+                resting_hr_bpm=50,
+                body_battery_charged=60 if day < days else 30,
+                body_battery_drained=40,
+            ),
+            TrainingReadiness(date=cdate, score=70),
+        )
+        database.put_sleep(SleepSummary(date=cdate, sleep_score=80))
+        database.mark_synced("readiness", cdate)
+
+
+def test_trend_uses_garmins_last_night_hrv_when_nightly_average_is_absent(
+    tmp_path: Path,
+) -> None:
+    """The installed client models hrvSummary with lastNightAvg and no nightlyAverage."""
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    tools = GarminTools(_client(FakeGarmin()), database)
+    _seed_recovery_days(database)
+    for day in range(1, 8):
+        database.put_hrv(
+            HrvSummary(
+                date=f"2026-01-{day:02d}",
+                last_night_average_ms=90 if day == 7 else 60,
+                weekly_average_ms=62,
+            )
+        )
+
+    result = tools._recovery_trend(7, date(2026, 1, 7)).compact()
+    assert result["points"][-1]["hrv_nightly_average_ms"] == 90
+    metrics = {item["metric"]: item for item in result["metrics"]}
+    assert metrics["hrv_nightly_average_ms"]["current"] == 90
+    assert metrics["hrv_nightly_average_ms"]["recent_average"] == 60
+    assert metrics["hrv_nightly_average_ms"]["sample_days"] == 6
+    notices = {item["field"]: item for item in result["availability"]}
+    assert notices["hrv_nightly_average_ms"]["status"] == "alternate_garmin_source"
+
+
+def test_trend_reports_weekly_hrv_as_a_series_without_a_rolling_mean_deviation(
+    tmp_path: Path,
+) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    tools = GarminTools(_client(FakeGarmin()), database)
+    _seed_recovery_days(database)
+    for day in range(1, 8):
+        database.put_hrv(
+            HrvSummary(date=f"2026-01-{day:02d}", weekly_average_ms=60 + day)
+        )
+
+    result = tools._recovery_trend(7, date(2026, 1, 7)).compact()
+    assert [point["hrv_weekly_average_ms"] for point in result["points"]] == [
+        61, 62, 63, 64, 65, 66, 67
+    ]
+    # Deliberately no deviation metric: consecutive weekly averages share nights.
+    assert "hrv_weekly_average_ms" not in {item["metric"] for item in result["metrics"]}
+    notices = {item["field"]: item for item in result["availability"]}
+    assert notices["hrv_weekly_average_ms"]["status"] == "series_only_no_deviation"
+
+
+def test_trend_carries_body_battery_totals_without_extra_garmin_calls(
+    tmp_path: Path,
+) -> None:
+    fake = FakeGarmin()
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    tools = GarminTools(_client(fake), database)
+    _seed_recovery_days(database)
+    for day in range(1, 8):
+        database.put_hrv(HrvSummary(date=f"2026-01-{day:02d}", last_night_average_ms=60))
+
+    result = tools._recovery_trend(7, date(2026, 1, 7)).compact()
+    assert [point["body_battery_charged"] for point in result["points"]][-1] == 30
+    metrics = {item["metric"]: item for item in result["metrics"]}
+    assert metrics["body_battery_charged"]["current"] == 30
+    assert metrics["body_battery_charged"]["recent_average"] == 60
+    assert metrics["body_battery_charged"]["difference"] == -30
+    assert metrics["body_battery_drained"]["sample_days"] == 6
+    notices = {item["field"]: item for item in result["availability"]}
+    assert notices["body_battery_charged"]["status"] == "whole_day_total"
+    # The daily summary already carries these, so the trend costs no extra Garmin reads.
+    assert fake.calls == []

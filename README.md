@@ -55,7 +55,7 @@ The server exposes 17 read-only MCP tools:
 | `get_stress` | Daily stress durations by intensity band |
 | `get_training_readiness` | Garmin's readiness score and its components |
 | `get_recovery` | Sleep, HRV, Body Battery, stress, RHR, and readiness combined for one day, with a stated reason for any absent component |
-| `get_recovery_trend` | Recovery facts and current-date comparisons with preceding Garmin days |
+| `get_recovery_trend` | Sleep, HRV (nightly and weekly), RHR, readiness, recovery time, and Body Battery over 7/14/28 days, with current-date comparisons |
 | `get_training_context` | Recovery plus the requested date's preceding training and comparisons |
 | `get_activities` | Activities in a date range, up to 100 (defaults to the last 14 days) |
 | `get_recent_activities` | Activities from the last N days, optionally filtered by type |
@@ -136,6 +136,15 @@ uv run garmin-owl-smoke --activity-id ACTIVITY_ID
 ```
 
 The smoke command reports only the failing Garmin read and exception class; it never prints raw responses or sensitive values.
+
+Garmin returns `trainingStatus` as an unlabeled numeric code. `garmin-owl` reports it as
+`training_status_code` and does not guess what a code means; `training_status` is populated only
+when Garmin also sends wording. To find out whether your account's response carries a label key,
+run the redacted probe, which prints key names only and never any values:
+
+```bash
+uv run python -m garmin_owl.diagnostic --training-status 2026-08-31
+```
 
 ### Build the Claude extension
 

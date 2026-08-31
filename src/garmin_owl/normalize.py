@@ -30,6 +30,7 @@ from .notices import (
     cycle_notices,
     derived_notice,
     unavailable_source_notice,
+    unlabeled_status_notice,
 )
 
 MAX_TIMESERIES_POINTS = 48
@@ -421,17 +422,42 @@ def _find_value(raw: Any, keys: tuple[str, ...]) -> Any:
     return None
 
 
+# Keys through which Garmin has been observed to ship the human-readable status wording.
+STATUS_PHRASE_KEYS = (
+    "trainingStatusFeedbackPhrase",
+    "trainingStatusPhrase",
+    "trainingStatusKey",
+)
+
+
 def _status_phrase(status_raw: Any) -> str | None:
     """Return Garmin's training-status wording, never its opaque numeric code.
 
-    ``trainingStatus`` is an integer code in current responses; rendering it as text would make
-    a meaningless number look like a Garmin status name.
+    ``trainingStatus`` is a code in current responses.  Rendering it as text would make a
+    meaningless number look like a Garmin status name, and garmin-owl does not ship a
+    code-to-label table it cannot verify against the installed client, so a bare code yields
+    no label at all -- it is reported separately as ``training_status_code``.
     """
-    phrase = _find_value(status_raw, ("trainingStatusFeedbackPhrase",))
-    if isinstance(phrase, str):
+    phrase = _find_value(status_raw, STATUS_PHRASE_KEYS)
+    if isinstance(phrase, str) and not phrase.strip().isdigit():
         return _text(phrase)
     value = _find_value(status_raw, ("trainingStatus",))
-    return _text(value) if isinstance(value, str) else None
+    # A numeric string such as "7" is a code wearing a string's clothes, not a label.
+    if isinstance(value, str) and not value.strip().isdigit():
+        return _text(value)
+    return None
+
+
+def _status_code(status_raw: Any) -> int | None:
+    """Return Garmin's numeric training-status code, whatever type it arrives as."""
+    value = _find_value(status_raw, ("trainingStatus",))
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return _integer(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return _integer(value.strip())
+    return None
 
 
 def normalize_training_load(
@@ -443,9 +469,15 @@ def normalize_training_load(
     unavailable_sources: Sequence[str] = (),
 ) -> TrainingLoad:
     """Extract only the documented/observed aggregate training fields."""
+    phrase = _status_phrase(status_raw)
+    code = _status_code(status_raw)
+    unlabeled_code = (
+        [] if phrase is not None or code is None else [unlabeled_status_notice(code)]
+    )
     return TrainingLoad(
         date=date,
-        training_status=_status_phrase(status_raw),
+        training_status=phrase,
+        training_status_code=code,
         # ``monthlyLoad`` is deliberately not accepted here: it is a different Garmin metric on a
         # different window, and substituting it would silently mislabel the acute load.
         acute_load=_rounded(_find_value(status_raw, ("acuteTrainingLoad", "acuteLoad")), 1),
@@ -459,7 +491,10 @@ def normalize_training_load(
             _find_value(endurance_raw, ("overallScore", "enduranceScore")), 1
         ),
         hill_score=_rounded(_find_value(hill_raw, ("overallScore", "hillScore")), 1),
-        availability=[unavailable_source_notice(source) for source in unavailable_sources],
+        availability=[
+            *unlabeled_code,
+            *(unavailable_source_notice(source) for source in unavailable_sources),
+        ],
     )
 
 

@@ -69,7 +69,7 @@
     },
     {
       "name": "get_recovery_trend",
-      "description": "Read current-date recovery comparisons against preceding Garmin days."
+      "description": "Trend sleep, HRV (nightly and weekly), resting HR, readiness, and Body Battery across 7, 14, or 28 preceding Garmin days."
     },
     {
       "name": "get_training_week",

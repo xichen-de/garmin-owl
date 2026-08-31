@@ -16,6 +16,8 @@ RATE_LIMITED = "retrieval_failed_rate_limited"
 DATE_MISMATCH = "date_mismatch"
 DERIVED = "garmin_owl_derived"
 
+TRAINING_LOAD_SOURCES = ("training_status", "max_metrics", "endurance_score", "hill_score")
+
 _SOURCE_LABELS = {
     "training_status": "training status",
     "max_metrics": "VO2 max metrics",
@@ -32,6 +34,18 @@ def unavailable_source_notice(source: str) -> AvailabilityNotice:
         message=(
             f"Garmin returned no {label} for this date; fields sourced from it are absent "
             "rather than zero."
+        ),
+    )
+
+
+def unlabeled_status_notice(code: int) -> AvailabilityNotice:
+    return AvailabilityNotice(
+        field="training_status",
+        status="code_without_label",
+        message=(
+            f"Garmin returned training-status code {code} with no accompanying wording. "
+            "garmin-owl does not guess what the code means; the number is reported as "
+            "training_status_code so it is not mistaken for a Garmin status name."
         ),
     )
 

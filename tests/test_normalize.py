@@ -341,3 +341,35 @@ def test_derived_fertile_window_is_labelled_as_a_garmin_owl_calculation() -> Non
     }
     assert set(derived) == {"fertile_window_start", "fertile_window_end"}
     assert "cycle_start_date" in derived["fertile_window_start"]["message"]
+
+
+def test_numeric_training_status_is_kept_as_a_code_not_a_label() -> None:
+    """Garmin ships an unlabeled code; garmin-owl reports it without inventing a meaning."""
+    for raw in ({"trainingStatus": 7}, {"trainingStatus": "7"}):
+        result = normalize_training_load(raw, None, None, None, DATE).compact()
+        assert result["training_status_code"] == 7
+        assert "training_status" not in result
+        notice = next(
+            item for item in result["availability"] if item["field"] == "training_status"
+        )
+        assert notice["status"] == "code_without_label"
+        assert "7" in notice["message"]
+
+
+def test_garmin_supplied_wording_wins_and_clears_the_code_warning() -> None:
+    result = normalize_training_load(
+        {
+            "mostRecentTrainingStatus": {
+                "latestTrainingStatusData": {
+                    "3442": {"trainingStatus": 7, "trainingStatusFeedbackPhrase": "UNPRODUCTIVE_1"}
+                }
+            }
+        },
+        None,
+        None,
+        None,
+        DATE,
+    ).compact()
+    assert result["training_status"] == "UNPRODUCTIVE_1"
+    assert result["training_status_code"] == 7
+    assert "availability" not in result
