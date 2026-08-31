@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
 from datetime import date, timedelta
 from typing import Any
 
-from .client import GarminDataClient, GarminOwlError
+from .client import GarminDataClient, GarminOwlMissingDataError
 from .database import GarminDatabase
 from .models import SyncReport
 from .normalize import (
@@ -29,6 +28,31 @@ def dates_between(start: date, end: date) -> list[str]:
     if count > MAX_SYNC_DAYS:
         raise ValueError(f"sync range cannot exceed {MAX_SYNC_DAYS} days")
     return [(start + timedelta(days=offset)).isoformat() for offset in range(count)]
+
+
+def read_training_load_sources(
+    client: GarminDataClient, cdate: str
+) -> tuple[tuple[Any, Any, Any, Any], list[str]]:
+    """Read the four training-load sources, recording which returned no data.
+
+    Only "Garmin has nothing here" is absorbed.  Rate limits and transient failures propagate
+    so a partially retrieved load is never stored or returned as if it were complete.
+    """
+    reads = (
+        ("training_status", client.training_status),
+        ("max_metrics", client.max_metrics),
+        ("endurance_score", client.endurance_score),
+        ("hill_score", client.hill_score),
+    )
+    payloads: list[Any] = []
+    unavailable: list[str] = []
+    for name, read in reads:
+        try:
+            payloads.append(read(cdate))
+        except GarminOwlMissingDataError:
+            payloads.append(None)
+            unavailable.append(name)
+    return (payloads[0], payloads[1], payloads[2], payloads[3]), unavailable
 
 
 class SyncEngine:
@@ -62,21 +86,8 @@ class SyncEngine:
     def ensure_training_load(self, cdate: str, *, force: bool = False) -> bool:
         if self.database.is_fresh("training_load", cdate, force=force):
             return False
-        payloads: list[Any] = []
-        reads: tuple[Callable[[str], Any], ...] = (
-            self.client.training_status,
-            self.client.max_metrics,
-            self.client.endurance_score,
-            self.client.hill_score,
-        )
-        for read in reads:
-            try:
-                payloads.append(read(cdate))
-            except GarminOwlError:
-                payloads.append(None)
-        item = normalize_training_load(
-            payloads[0], payloads[1], payloads[2], payloads[3], cdate
-        )
+        payloads, unavailable = read_training_load_sources(self.client, cdate)
+        item = normalize_training_load(*payloads, cdate, unavailable)
         self.database.put_training_load(item)
         self.database.mark_synced("training_load", cdate)
         return True
@@ -100,17 +111,21 @@ class SyncEngine:
     ) -> SyncReport:
         force_dates = force_dates or set()
         self.client.reset_request_counts()
-        fresh = fetched = inserted = updated = 0
+        fresh = fetched = inserted = updated = unavailable = 0
         for cdate in requested:
             needed = False
             for resource in ("daily", "sleep", "hrv", "readiness"):
                 before = self.database.fetched_at(resource, cdate)
                 try:
                     called = self.ensure_resource(resource, cdate, force=cdate in force_dates)
-                except GarminOwlError:
-                    # A missing optional metric does not prevent other normalized reads.
-                    self.database.mark_synced(resource, cdate)
-                    called = True
+                except GarminOwlMissingDataError:
+                    # A metric Garmin has no data for does not prevent the other normalized
+                    # reads, but it also stored no row: counting it as inserted or updated
+                    # would report rows that do not exist.  It is not recorded as synced
+                    # either, so support appearing later is picked up on the next run.
+                    unavailable += 1
+                    needed = True
+                    continue
                 if called:
                     needed = True
                     if before is None:
@@ -129,6 +144,7 @@ class SyncEngine:
             dates_fetched=fetched,
             rows_inserted=inserted,
             rows_updated=updated,
+            reads_unavailable=unavailable,
             api_calls=self.client.request_counts(),
         )
 
@@ -175,6 +191,7 @@ def main() -> None:
         print(f"  {endpoint + ':':24s}{count:4d}")
     print(f"\nRows inserted:   {report.rows_inserted:8d}")
     print(f"Rows updated:    {report.rows_updated:8d}")
+    print(f"No Garmin data:  {report.reads_unavailable:8d}")
 
 
 if __name__ == "__main__":

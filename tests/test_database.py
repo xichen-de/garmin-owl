@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from garmin_owl.database import SCHEMA_VERSION, GarminDatabase
-from garmin_owl.models import ActivityDetail, ActivitySummary, DailySummary
+from garmin_owl.models import (
+    ActivityDetail,
+    ActivitySummary,
+    DailySummary,
+    HrvSummary,
+    SleepSummary,
+)
 
 
-def test_schema_version_permissions_and_no_sensitive_columns(tmp_path) -> None:
+def test_schema_version_permissions_and_no_sensitive_columns(tmp_path: Path) -> None:
     database = GarminDatabase(tmp_path / "private" / "garmin.sqlite")
     with database.connect() as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
@@ -32,7 +39,7 @@ def test_schema_version_permissions_and_no_sensitive_columns(tmp_path) -> None:
     assert database.path.parent.stat().st_mode & 0o077 == 0
 
 
-def test_upsert_has_no_duplicates_and_clear_preserves_database(tmp_path) -> None:
+def test_upsert_has_no_duplicates_and_clear_preserves_database(tmp_path: Path) -> None:
     database = GarminDatabase(tmp_path / "garmin.sqlite")
     first = DailySummary(date="2026-01-01", steps=100)
     second = DailySummary(date="2026-01-01", steps=200)
@@ -45,7 +52,7 @@ def test_upsert_has_no_duplicates_and_clear_preserves_database(tmp_path) -> None
     assert database.info().table_rows["daily_metrics"] == 0
 
 
-def test_freshness_today_yesterday_and_history(tmp_path) -> None:
+def test_freshness_today_and_recently_captured_rows(tmp_path: Path) -> None:
     database = GarminDatabase(tmp_path / "garmin.sqlite")
     local = datetime(2026, 8, 30, 10, tzinfo=UTC)
     database.put_daily(DailySummary(date="2026-08-30"), now=local - timedelta(minutes=19))
@@ -53,12 +60,57 @@ def test_freshness_today_yesterday_and_history(tmp_path) -> None:
     database.put_daily(DailySummary(date="2026-08-28"), now=local)
     assert database.is_fresh("daily", "2026-08-30", now=local)
     assert not database.is_fresh("daily", "2026-08-30", now=local + timedelta(minutes=2))
-    assert not database.is_fresh("daily", "2026-08-29", now=local)
-    assert database.is_fresh("daily", "2026-08-29", now=local.replace(hour=12))
+    # Yesterday's row was captured this morning, before the day settles at noon: reusable
+    # briefly, but re-fetched once it settles so a late device upload is picked up.
+    assert database.is_fresh("daily", "2026-08-29", now=local)
+    assert not database.is_fresh("daily", "2026-08-29", now=local + timedelta(minutes=21))
+    assert not database.is_fresh("daily", "2026-08-29", now=local.replace(hour=13))
+    # 2026-08-28 settled at 2026-08-29 12:00, before this row was captured.
     assert database.is_fresh("daily", "2026-08-28", now=local)
 
 
-def test_activity_detail_round_trip_and_cache_marker(tmp_path) -> None:
+def test_row_captured_before_its_day_settled_is_refetched(tmp_path: Path) -> None:
+    """A partially synchronized day must not stay authoritative forever."""
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    # Captured at 09:00 on the day itself, when the watch had not finished uploading.
+    captured = datetime(2026, 8, 20, 9, tzinfo=UTC)
+    database.put_daily(DailySummary(date="2026-08-20", steps=1), now=captured)
+    assert not database.is_fresh("daily", "2026-08-20", now=datetime(2026, 8, 25, 9, tzinfo=UTC))
+
+    # Re-captured after the day settled: now trustworthy indefinitely.
+    settled = datetime(2026, 8, 21, 12, tzinfo=UTC)
+    database.put_daily(DailySummary(date="2026-08-20", steps=9), now=settled)
+    assert database.is_fresh("daily", "2026-08-20", now=datetime(2026, 8, 25, 9, tzinfo=UTC))
+
+
+def test_activity_range_captured_mid_window_is_refetched(tmp_path: Path) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    database.mark_synced(
+        "activities", "2026-08-17:2026-08-20", now=datetime(2026, 8, 20, 9, tzinfo=UTC)
+    )
+    later = datetime(2026, 8, 24, 9, tzinfo=UTC)
+    assert not database.is_activity_range_fresh("2026-08-17", "2026-08-20", now=later)
+    database.mark_synced(
+        "activities", "2026-08-17:2026-08-20", now=datetime(2026, 8, 21, 13, tzinfo=UTC)
+    )
+    assert database.is_activity_range_fresh("2026-08-17", "2026-08-20", now=later)
+
+
+def test_activity_detail_captured_before_settlement_is_refetched(tmp_path: Path) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    detail = ActivityDetail(
+        summary=ActivitySummary(activity_id=7, start_time="2026-08-20 08:00:00")
+    )
+    database.put_activity_detail(detail, now=datetime(2026, 8, 20, 9, tzinfo=UTC))
+    later = datetime(2026, 8, 25, 9, tzinfo=UTC)
+    assert database.get_activity(7, require_detail=True, now=later) is None
+    # The summary row itself is still available; only the stale detail is withheld.
+    assert database.get_activity(7, now=later) is not None
+    database.put_activity_detail(detail, now=datetime(2026, 8, 21, 13, tzinfo=UTC))
+    assert database.get_activity(7, require_detail=True, now=later) is not None
+
+
+def test_activity_detail_round_trip_and_cache_marker(tmp_path: Path) -> None:
     database = GarminDatabase(tmp_path / "garmin.sqlite")
     detail = ActivityDetail(
         summary=ActivitySummary(
@@ -77,7 +129,19 @@ def test_activity_detail_round_trip_and_cache_marker(tmp_path) -> None:
     assert cached.hr_zone_coverage_percent == 50
 
 
-def test_sqlite_file_contains_no_raw_json_payload(tmp_path) -> None:
+def test_recovery_rows_preserve_sleep_and_hrv_without_daily_summary(tmp_path: Path) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    database.put_sleep(SleepSummary(date="2026-01-01", sleep_score=80))
+    database.put_hrv(HrvSummary(date="2026-01-01", nightly_average_ms=55))
+
+    rows = database.recovery_rows("2026-01-01", "2026-01-01")
+    assert len(rows) == 1
+    assert rows[0]["sleep_score"] == 80
+    assert rows[0]["nightly_avg_ms"] == 55
+    assert rows[0]["resting_hr_bpm"] is None
+
+
+def test_sqlite_file_contains_no_raw_json_payload(tmp_path: Path) -> None:
     database = GarminDatabase(tmp_path / "garmin.sqlite")
     database.put_daily(DailySummary(date="2026-01-01", steps=1))
     # Sanity-check that the DB can be opened by stdlib SQLite and has normalized rows.
@@ -88,7 +152,7 @@ def test_sqlite_file_contains_no_raw_json_payload(tmp_path) -> None:
         connection.close()
 
 
-def test_schema_one_cache_migrates_to_cycle_schema(tmp_path) -> None:
+def test_schema_one_cache_migrates_to_cycle_schema(tmp_path: Path) -> None:
     path = tmp_path / "garmin.sqlite"
     connection = sqlite3.connect(path)
     try:

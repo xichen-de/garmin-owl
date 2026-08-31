@@ -14,6 +14,7 @@ from garmin_owl.normalize import (
     normalize_hrv,
     normalize_sleep,
     normalize_stress,
+    normalize_training_load,
     normalize_training_readiness,
 )
 
@@ -259,3 +260,84 @@ def test_cycle_normalization_excludes_sensitive_day_log() -> None:
     assert "private" not in serialized
     assert "symptoms" not in serialized
     assert "sexual" not in serialized
+
+
+def test_body_battery_never_reports_another_dates_record() -> None:
+    """Garmin's range-shaped read can answer with a neighbouring day."""
+    raw = [{"date": "2026-08-29", "charged": 40, "drained": 10}]
+    result = normalize_body_battery(raw, "2026-08-30").compact()
+    assert result == {
+        "date": "2026-08-30",
+        "availability": [
+            {
+                "field": "body_battery",
+                "status": "date_mismatch",
+                "message": result["availability"][0]["message"],
+            }
+        ],
+    }
+    assert "charged" not in result
+    matched = normalize_body_battery(
+        [{"date": "2026-08-30", "charged": 40}], "2026-08-30"
+    ).compact()
+    assert matched["charged"] == 40
+    assert "availability" not in matched
+
+
+def test_missing_body_battery_is_missing_not_unmatched() -> None:
+    result = normalize_body_battery([], "2026-08-30").compact()
+    assert result["availability"][0]["status"] == "missing_or_unsupported"
+
+
+def test_training_load_keeps_acute_load_and_monthly_load_distinct() -> None:
+    """``monthlyLoad`` is a different Garmin metric on a different window."""
+    result = normalize_training_load(
+        {"monthlyLoad": 900}, None, None, None, DATE
+    ).compact()
+    assert "acute_load" not in result
+    assert normalize_training_load({"acuteTrainingLoad": 300}, None, None, None, DATE).compact()[
+        "acute_load"
+    ] == 300
+
+
+def test_training_status_code_is_not_rendered_as_a_status_name() -> None:
+    numeric = normalize_training_load({"trainingStatus": 3}, None, None, None, DATE).compact()
+    assert "training_status" not in numeric
+    phrased = normalize_training_load(
+        {"trainingStatus": 3, "trainingStatusFeedbackPhrase": "PRODUCTIVE_1"},
+        None,
+        None,
+        None,
+        DATE,
+    ).compact()
+    assert phrased["training_status"] == "PRODUCTIVE_1"
+
+
+def test_training_load_discloses_unavailable_sources() -> None:
+    result = normalize_training_load(
+        {"acuteTrainingLoad": 300}, None, None, None, DATE, ["max_metrics", "hill_score"]
+    ).compact()
+    assert [item["field"] for item in result["availability"]] == ["max_metrics", "hill_score"]
+    assert all(item["status"] == "missing_or_unsupported" for item in result["availability"])
+    assert "vo2_max" not in result
+
+
+def test_derived_fertile_window_is_labelled_as_a_garmin_owl_calculation() -> None:
+    raw_day = {
+        "daySummary": {
+            "currentPhase": 2,
+            "startDate": "2026-08-01",
+            "fertileWindowStart": 11,
+            "lengthOfFertileWindow": 6,
+        }
+    }
+    result = normalize_cycle(raw_day, None, "2026-08-12").compact()
+    assert result["fertile_window_start"] == "2026-08-11"
+    assert result["fertile_window_end"] == "2026-08-16"
+    derived = {
+        item["field"]: item
+        for item in result["availability"]
+        if item["status"] == "garmin_owl_derived"
+    }
+    assert set(derived) == {"fertile_window_start", "fertile_window_end"}
+    assert "cycle_start_date" in derived["fertile_window_start"]["message"]

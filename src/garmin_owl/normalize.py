@@ -23,6 +23,14 @@ from .models import (
     TrainingLoad,
     TrainingReadiness,
 )
+from .notices import (
+    DATE_MISMATCH,
+    MISSING_OR_UNSUPPORTED,
+    body_battery_notice,
+    cycle_notices,
+    derived_notice,
+    unavailable_source_notice,
+)
 
 MAX_TIMESERIES_POINTS = 48
 MAX_ACTIVITY_LAPS = 200
@@ -230,7 +238,21 @@ def normalize_body_battery(
     raw: Any, date: str, *, include_timeseries: bool = False
 ) -> BodyBatterySummary:
     entries = [_map(item) for item in _list(raw)]
-    data = next((x for x in entries if x.get("date") == date), entries[0] if entries else _map(raw))
+    if not entries and isinstance(raw, Mapping):
+        entries = [_map(raw)]
+    # Garmin's Body Battery read is range-shaped and can answer with neighbouring days.  A record
+    # for another date must not be reported as this date's, so it is discarded and disclosed.
+    matching = [item for item in entries if _text(item.get("date")) in (None, date)]
+    if not matching:
+        return BodyBatterySummary(
+            date=date,
+            availability=[
+                body_battery_notice(
+                    DATE_MISMATCH if entries else MISSING_OR_UNSUPPORTED, date
+                )
+            ],
+        )
+    data = matching[0]
     all_points = _points(
         _first(data, "bodyBatteryValuesArray", "bodyBatteryValues", "values"), cap=None
     )
@@ -399,22 +421,34 @@ def _find_value(raw: Any, keys: tuple[str, ...]) -> Any:
     return None
 
 
+def _status_phrase(status_raw: Any) -> str | None:
+    """Return Garmin's training-status wording, never its opaque numeric code.
+
+    ``trainingStatus`` is an integer code in current responses; rendering it as text would make
+    a meaningless number look like a Garmin status name.
+    """
+    phrase = _find_value(status_raw, ("trainingStatusFeedbackPhrase",))
+    if isinstance(phrase, str):
+        return _text(phrase)
+    value = _find_value(status_raw, ("trainingStatus",))
+    return _text(value) if isinstance(value, str) else None
+
+
 def normalize_training_load(
     status_raw: Any,
     max_metrics_raw: Any,
     endurance_raw: Any,
     hill_raw: Any,
     date: str,
+    unavailable_sources: Sequence[str] = (),
 ) -> TrainingLoad:
     """Extract only the documented/observed aggregate training fields."""
     return TrainingLoad(
         date=date,
-        training_status=_text(
-            _find_value(status_raw, ("trainingStatus", "trainingStatusFeedbackPhrase"))
-        ),
-        acute_load=_rounded(
-            _find_value(status_raw, ("acuteTrainingLoad", "acuteLoad", "monthlyLoad")), 1
-        ),
+        training_status=_status_phrase(status_raw),
+        # ``monthlyLoad`` is deliberately not accepted here: it is a different Garmin metric on a
+        # different window, and substituting it would silently mislabel the acute load.
+        acute_load=_rounded(_find_value(status_raw, ("acuteTrainingLoad", "acuteLoad")), 1),
         load_ratio=_rounded(
             _find_value(status_raw, ("acuteChronicWorkloadRatio", "loadRatio")), 2
         ),
@@ -425,6 +459,7 @@ def normalize_training_load(
             _find_value(endurance_raw, ("overallScore", "enduranceScore")), 1
         ),
         hill_score=_rounded(_find_value(hill_raw, ("overallScore", "hillScore")), 1),
+        availability=[unavailable_source_notice(source) for source in unavailable_sources],
     )
 
 
@@ -464,14 +499,25 @@ def normalize_cycle(raw_day: Any, raw_calendar: Any, date: str) -> CycleSummary:
         if predicted and predicted_start and predicted_start >= date:
             predicted_dates.append(predicted_start)
 
-    availability = []
+    availability: list[AvailabilityNotice] = []
+    if fertile_start:
+        availability.append(
+            derived_notice(
+                "fertile_window_start",
+                "cycle_start_date + (Garmin's fertileWindowStart day-of-cycle - 1); Garmin "
+                "returns day offsets, not dates.",
+            )
+        )
+    if fertile_end:
+        availability.append(
+            derived_notice(
+                "fertile_window_end",
+                "fertile_window_start + (Garmin's lengthOfFertileWindow - 1) days.",
+            )
+        )
     if not summary:
         availability.append(
-            AvailabilityNotice(
-                field="cycle",
-                status="unsupported_or_not_configured",
-                message="Garmin did not provide cycle tracking data for this date.",
-            )
+            cycle_notices("unsupported_or_not_configured", date)[0]
         )
     return CycleSummary(
         date=date,

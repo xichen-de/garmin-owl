@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from garminconnect import (
     GarminConnectAuthenticationError,
@@ -50,7 +50,8 @@ def main() -> None:
             "training readiness",
             normalize_training_readiness(client.training_readiness(cdate), cdate),
         )
-        activities = normalize_activities(client.activities(None, None, 1), 1)
+        recent_start = (date.today() - timedelta(days=13)).isoformat()
+        activities = normalize_activities(client.activities(recent_start, cdate, 1), 1)
         check("latest activity", activities)
         if activities:
             summary, hr, power = client.activity(activities[0].activity_id)

@@ -49,7 +49,7 @@ def get_hrv(date: str | None = None, include_timeseries: bool = False) -> dict[s
 
 @mcp.tool()
 def get_recovery(date: str | None = None) -> dict[str, Any]:
-    """Combine Garmin-provided sleep, HRV, Body Battery, stress, RHR, and readiness fields."""
+    """Combine Garmin sleep, HRV, Body Battery, stress, RHR, readiness; states why any is absent."""
     return get_tools().get_recovery(date)
 
 
@@ -61,13 +61,13 @@ def get_training_readiness(date: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def get_body_battery(date: str | None = None, include_timeseries: bool = False) -> dict[str, Any]:
-    """Get daily Garmin Body Battery; optional series is capped at 48 points."""
+    """Get Garmin Body Battery charged/drained and start/end/high/low levels for one day."""
     return get_tools().get_body_battery(date, include_timeseries)
 
 
 @mcp.tool()
 def get_stress(date: str | None = None, include_timeseries: bool = False) -> dict[str, Any]:
-    """Get Garmin daily stress durations; optional series is capped at 48 points."""
+    """Get Garmin daily average/max stress and per-band durations; series capped at 48 points."""
     return get_tools().get_stress(date, include_timeseries)
 
 
@@ -77,7 +77,7 @@ def get_activities(
     end_date: str | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """List up to 100 concise activities, optionally within an inclusive date range."""
+    """List concise activities in an inclusive date range; defaults to the last 14 days."""
     return get_tools().get_activities(start_date, end_date, limit)
 
 
@@ -97,25 +97,25 @@ def get_body_composition(
 
 @mcp.tool()
 def get_training_context(date: str | None = None) -> dict[str, Any]:
-    """Get cache-backed recovery, recent training, and transparent 7-day comparisons."""
+    """Get recovery and preceding training anchored to date, with transparent comparisons."""
     return get_tools().get_training_context(date)
 
 
 @mcp.tool()
 def get_recovery_trend(days: int = 7) -> dict[str, Any]:
-    """Get 7, 14, or 28 days of recovery facts, averages, and missing-date metadata."""
+    """Compare today's recovery facts with preceding days, including missing-data metadata."""
     return get_tools().get_recovery_trend(days)
 
 
 @mcp.tool()
 def get_training_week(date: str | None = None) -> dict[str, Any]:
-    """Summarize the ISO Monday-to-Sunday week containing date."""
+    """Summarize a Mon-Sun week; every total discloses how many activities reported the metric."""
     return get_tools().get_training_week(date)
 
 
 @mcp.tool()
 def get_training_load(date: str | None = None) -> dict[str, Any]:
-    """Get Garmin training status/load, VO2 max, endurance, and hill fields when available."""
+    """Get Garmin training status/load, VO2 max, endurance, hill; names unavailable sources."""
     return get_tools().get_training_load(date)
 
 
@@ -131,7 +131,7 @@ def get_recent_activities(
 
 @mcp.tool()
 def compare_activities(activity_ids: list[int]) -> dict[str, Any]:
-    """Compare 2-10 activity details and transparent metric ranges."""
+    """Compare 2-10 activities; each metric range states how many reported a value."""
     return get_tools().compare_activities(activity_ids)
 
 

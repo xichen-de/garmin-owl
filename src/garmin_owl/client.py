@@ -25,7 +25,6 @@ class GarminReadAPI(Protocol):
     def get_training_readiness(self, cdate: str) -> Any: ...
     def get_body_battery(self, startdate: str, enddate: str | None = None) -> Any: ...
     def get_stress_data(self, cdate: str) -> dict[str, Any]: ...
-    def get_activities(self, start: int = 0, limit: int = 20) -> Any: ...
     def get_activities_by_date(self, startdate: str, enddate: str | None = None) -> Any: ...
     def get_activity(self, activity_id: str) -> dict[str, Any]: ...
     # Upstream 0.3.11 annotates these as dict, but live endpoints return lists.
@@ -123,12 +122,15 @@ class GarminDataClient:
     def stress(self, cdate: str) -> Any:
         return self._read("stress", lambda: self.__api.get_stress_data(cdate))
 
-    def activities(self, startdate: str | None, enddate: str | None, limit: int) -> Any:
-        if startdate is None and enddate is None:
-            return self._read("activities", lambda: self.__api.get_activities(0, limit))
+    def activities(self, startdate: str, enddate: str, limit: int) -> Any:
+        """Read activities for an explicit inclusive date range only.
+
+        The unbounded "most recent N activities" read is deliberately not exposed: it cannot be
+        anchored to a requested date, so a historical question could be answered with today's
+        training.
+        """
         data = self._read(
-            "activities",
-            lambda: self.__api.get_activities_by_date(startdate or enddate or "", enddate)
+            "activities", lambda: self.__api.get_activities_by_date(startdate, enddate)
         )
         return data[:limit] if isinstance(data, list) else data
 

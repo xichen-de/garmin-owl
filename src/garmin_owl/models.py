@@ -13,7 +13,18 @@ class OwlModel(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     def compact(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude_none=True, exclude_defaults=False)
+        data = self.model_dump(mode="json", exclude_none=True, exclude_defaults=False)
+        # An empty availability list carries no information and would otherwise appear on every
+        # response.  Absence of the key means "nothing to disclose", never "not checked".
+        if not data.get("availability", True):
+            del data["availability"]
+        return data
+
+
+class AvailabilityNotice(OwlModel):
+    field: str
+    status: str
+    message: str
 
 
 class TimePoint(OwlModel):
@@ -93,6 +104,7 @@ class BodyBatterySummary(OwlModel):
     highest_level: int | None = None
     lowest_level: int | None = None
     timeseries: list[TimePoint] | None = None
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
 
 
 class StressSummary(OwlModel):
@@ -105,6 +117,7 @@ class StressSummary(OwlModel):
     medium_duration_seconds: int | None = None
     high_duration_seconds: int | None = None
     timeseries: list[TimePoint] | None = None
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
 
 
 class RecoverySummary(OwlModel):
@@ -115,6 +128,7 @@ class RecoverySummary(OwlModel):
     stress: StressSummary | None = None
     resting_hr_bpm: int | None = None
     training_readiness: TrainingReadiness | None = None
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
     note: str = "Garmin-provided metrics only; no derived medical or recovery score."
 
 
@@ -160,12 +174,6 @@ class ActivityDetail(OwlModel):
     availability: list[AvailabilityNotice] = Field(default_factory=list)
 
 
-class AvailabilityNotice(OwlModel):
-    field: str
-    status: str
-    message: str
-
-
 class DailyRecoveryPoint(OwlModel):
     date: str
     sleep_score: int | None = None
@@ -177,11 +185,15 @@ class DailyRecoveryPoint(OwlModel):
 
 class TrendMetric(OwlModel):
     metric: str
+    current_date: str
     current: float | None = None
     recent_average: float | None = None
     difference: float | None = None
     percent_difference: float | None = None
     sample_days: int = 0
+    baseline_start: str | None = None
+    baseline_end: str | None = None
+    calculation: str = "Current date compared with the mean of available preceding days."
 
 
 class RecoveryTrend(OwlModel):
@@ -222,20 +234,32 @@ class TrainingWeek(OwlModel):
     week_end: str
     activities: list[ActivitySummary]
     activity_count: int
-    total_duration_seconds: float
-    total_distance_m: float
-    total_calories_kcal: float
-    activity_type_counts: dict[str, int]
-    hr_zones_seconds: dict[str, float]
+    total_duration_seconds: float | None = None
+    total_distance_m: float | None = None
+    total_calories_kcal: float | None = None
+    # Garmin omits distance for strength work and calories for some devices.  Each total sums
+    # only the activities that actually reported the metric; these say how many that was.
+    duration_activity_count: int = 0
+    distance_activity_count: int = 0
+    calories_activity_count: int = 0
+    activity_type_counts: dict[str, int] = Field(default_factory=dict)
+    hr_zones_seconds: dict[str, float] = Field(default_factory=dict)
     highest_aerobic_training_effect: float | None = None
     highest_anaerobic_training_effect: float | None = None
+    detail_activity_count: int = 0
+    training_effect_activity_count: int = 0
+    hr_zones_activity_count: int = 0
     availability: list[AvailabilityNotice] = Field(default_factory=list)
 
 
 class ComparisonDelta(OwlModel):
     metric: str
+    # ``None`` marks an activity for which Garmin reported no value; it is never zero-filled.
     values: dict[str, float | None]
     range: float | None = None
+    compared_activity_count: int = 0
+    missing_activity_count: int = 0
+    calculation: str = "Range is max - min over the activities that reported the metric."
 
 
 class ActivityComparison(OwlModel):
@@ -250,6 +274,9 @@ class SyncReport(OwlModel):
     dates_fetched: int
     rows_inserted: int
     rows_updated: int
+    # Reads for which Garmin reported no data. Nothing was stored, so these are neither
+    # inserted nor updated rows, and they are retried on the next sync.
+    reads_unavailable: int = 0
     api_calls: dict[str, int]
 
 

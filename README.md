@@ -51,24 +51,30 @@ The server exposes 17 read-only MCP tools:
 | `get_daily_summary` | Steps, distance, calories, HR, stress, floors, intensity minutes for one day |
 | `get_sleep` | Sleep score, stages, timing, respiration, SpO2 |
 | `get_hrv` | HRV status and nightly/weekly averages |
-| `get_body_battery` | Daily Body Battery charged/drained and levels |
+| `get_body_battery` | Daily Body Battery charged/drained and start/end/highest/lowest levels |
 | `get_stress` | Daily stress durations by intensity band |
 | `get_training_readiness` | Garmin's readiness score and its components |
-| `get_recovery` | Sleep, HRV, Body Battery, stress, RHR, and readiness combined for one day |
-| `get_recovery_trend` | Recovery facts and averages over 7, 14, or 28 days |
-| `get_training_context` | Recovery plus recent training and a transparent 7-day comparison |
-| `get_activities` | Activities in a date range (up to 100) |
+| `get_recovery` | Sleep, HRV, Body Battery, stress, RHR, and readiness combined for one day, with a stated reason for any absent component |
+| `get_recovery_trend` | Recovery facts and current-date comparisons with preceding Garmin days |
+| `get_training_context` | Recovery plus the requested date's preceding training and comparisons |
+| `get_activities` | Activities in a date range, up to 100 (defaults to the last 14 days) |
 | `get_recent_activities` | Activities from the last N days, optionally filtered by type |
 | `get_activity` | One activity's laps, training effect, and HR/power zones |
 | `compare_activities` | Side-by-side metrics for 2-10 activities |
-| `get_training_week` | Totals and zone time for the Mon-Sun week containing a date |
+| `get_training_week` | Totals and available zone time for the Mon-Sun week, with per-metric activity coverage |
 | `get_training_load` | Training status, VO2 max, endurance, and hill scores |
 | `get_body_composition` | Weight and related measurements over a date range |
 | `get_cycle` | Cycle phase, day, and Garmin predictions (fetched only when asked) |
 
 The normalized response for `get_cycle` intentionally excludes notes, symptoms, moods, sexual activity, and raw daily logs.
 
-All output is concise and normalized. Missing device metrics remain missing rather than being guessed.
+All output is concise and normalized. Missing device metrics remain missing rather than being
+guessed, and are never summed as zero: a weekly total covers only the activities that reported the
+metric and says how many that was. Derived comparisons identify their current date, preceding
+baseline range, sample count, and calculation, and values garmin-owl calculates rather than reads
+from Garmin are labelled as such in an `availability` list. That list also distinguishes *why*
+something is absent — Garmin had no data, the metric is unsupported, or the read failed or was
+rate-limited — so an unavailable value is never reported as a measured zero or a silent gap.
 
 ## Sync and local cache
 
@@ -79,7 +85,7 @@ uv run garmin-owl-sync
 uv run garmin-owl-sync --days 30
 ```
 
-The default sync loads the last seven days of daily summaries, sleep, HRV, training readiness, and activity summaries. It fetches only missing or stale records: today's data refreshes after 20 minutes, while completed historical days are treated as stable. Activity details and cycle data stay on demand.
+The default sync loads the last seven days of daily summaries, sleep, HRV, training readiness, and activity summaries. It fetches only missing or stale records. Because watches and scales upload late, a calendar day is treated as settled only at noon the following day: a record is trusted indefinitely once it was *fetched* after its day settled, and a record captured while the day was still synchronizing is reused for at most 20 minutes and then re-fetched. Body Battery, stress, activity details, and cycle data stay on demand and are cached under the same rule.
 
 To inspect or clear the cache:
 

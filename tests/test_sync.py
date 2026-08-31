@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
-from garmin_owl.client import GarminDataClient
+import pytest
+from garminconnect import GarminConnectConnectionError
+
+from garmin_owl.client import GarminDataClient, GarminOwlUnavailableError
 from garmin_owl.database import GarminDatabase
 from garmin_owl.sync import SyncEngine
 
@@ -34,7 +38,7 @@ class SyncGarmin:
         return []
 
 
-def test_second_historical_sync_makes_zero_garmin_calls(tmp_path) -> None:
+def test_second_historical_sync_makes_zero_garmin_calls(tmp_path: Path) -> None:
     fake = SyncGarmin()
     client = GarminDataClient(fake)  # type: ignore[arg-type]
     engine = SyncEngine(client, GarminDatabase(tmp_path / "garmin.sqlite"))
@@ -54,7 +58,7 @@ def test_second_historical_sync_makes_zero_garmin_calls(tmp_path) -> None:
     assert second.already_fresh == 2
 
 
-def test_only_one_missing_resource_is_fetched(tmp_path) -> None:
+def test_only_one_missing_resource_is_fetched(tmp_path: Path) -> None:
     fake = SyncGarmin()
     client = GarminDataClient(fake)  # type: ignore[arg-type]
     database = GarminDatabase(tmp_path / "garmin.sqlite")
@@ -67,3 +71,19 @@ def test_only_one_missing_resource_is_fetched(tmp_path) -> None:
     report = engine.sync_dates(dates, include_activities=False)
     assert report.api_calls == {"HRV": 1}
     assert fake.calls == [("hrv", "2026-01-14")]
+
+
+class UnavailableHrvGarmin(SyncGarmin):
+    def get_hrv_data(self, cdate: str) -> dict[str, Any]:
+        raise GarminConnectConnectionError("temporary outage")
+
+
+def test_sync_does_not_cache_transient_failure_as_missing(tmp_path: Path) -> None:
+    client = GarminDataClient(UnavailableHrvGarmin())  # type: ignore[arg-type]
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    engine = SyncEngine(client, database)
+
+    with pytest.raises(GarminOwlUnavailableError):
+        engine.sync_dates(["2026-01-01"], include_activities=False)
+
+    assert database.fetched_at("hrv", "2026-01-01") is None
