@@ -8,6 +8,7 @@ from datetime import date as date_value
 from typing import Any
 
 from .models import (
+    SKIN_TEMPERATURE_BASIS,
     ActivityDetail,
     ActivityLap,
     ActivitySummary,
@@ -16,12 +17,17 @@ from .models import (
     BodyCompositionEntry,
     CycleSummary,
     DailySummary,
+    HeartRateZoneProfile,
     HrvSummary,
+    PowerZoneProfile,
+    RunningTolerance,
+    RunningTolerancePoint,
     SleepSummary,
     StressSummary,
     TimePoint,
     TrainingLoad,
     TrainingReadiness,
+    TrainingZones,
 )
 from .notices import (
     DATE_MISMATCH,
@@ -152,6 +158,19 @@ def normalize_daily_summary(raw: Any, date: str) -> DailySummary:
         ),
         moderate_intensity_minutes=_integer(data.get("moderateIntensityMinutes")),
         vigorous_intensity_minutes=_integer(data.get("vigorousIntensityMinutes")),
+        active_seconds=_integer(data.get("activeSeconds")),
+        highly_active_seconds=_integer(data.get("highlyActiveSeconds")),
+        sedentary_seconds=_integer(data.get("sedentarySeconds")),
+        daily_step_goal=_integer(data.get("dailyStepGoal")),
+        intensity_minutes_goal=_integer(data.get("intensityMinutesGoal")),
+        last_seven_days_avg_resting_hr_bpm=_integer(data.get("lastSevenDaysAvgRestingHeartRate")),
+        body_battery_during_sleep=_integer(data.get("bodyBatteryDuringSleep")),
+        body_battery_at_wake=_integer(data.get("bodyBatteryAtWakeTime")),
+        average_waking_respiration=_number(data.get("avgWakingRespirationValue")),
+        highest_respiration=_number(data.get("highestRespirationValue")),
+        lowest_respiration=_number(data.get("lowestRespirationValue")),
+        average_spo2_percent=_number(data.get("averageSpo2")),
+        lowest_spo2_percent=_number(data.get("lowestSpo2")),
     )
 
 
@@ -163,6 +182,9 @@ def normalize_sleep(raw: Any, date: str) -> SleepSummary:
     score = _first(data, "sleepScore", "overallSleepScore")
     if score is None:
         score = _first(overall, "value", "score")
+    sleep_need = _map(root.get("sleepNeed")) or _map(data.get("sleepNeed"))
+    score_feedback = _nested(root, "sleepScores", "overall") or overall
+    skin_temperature = _rounded(_first(root, "avgSkinTempDeviationC", "skinTempC"), 2)
     return SleepSummary(
         date=date,
         sleep_score=_integer(score),
@@ -184,6 +206,28 @@ def normalize_sleep(raw: Any, date: str) -> SleepSummary:
         highest_respiration=_number(_first(data, "highestRespirationValue", "highestRespiration")),
         average_spo2_percent=_number(_first(data, "averageSpO2Value", "averageSpo2")),
         lowest_spo2_percent=_number(_first(data, "lowestSpO2Value", "lowestSpo2")),
+        average_hr_bpm=_number(_first(data, "avgHeartRate", "averageHeartRate")),
+        average_stress=_number(_first(data, "avgSleepStress", "averageSleepStress")),
+        nap_seconds=_integer(_first(data, "napTimeSeconds", "napSeconds")),
+        awake_count=_integer(data.get("awakeCount")),
+        restless_moments_count=_integer(
+            _first(root, "restlessMomentsCount", "restlessMomentCount")
+        ),
+        sleep_need_minutes=_integer(_first(sleep_need, "actual", "sleepNeed")),
+        sleep_need_baseline_minutes=_integer(sleep_need.get("baseline")),
+        sleep_need_feedback=_text(_first(sleep_need, "feedback", "feedbackPhrase")),
+        sleep_alignment_status=_text(
+            _first(root, "sleepAlignmentStatus", "sleepWindowConfirmationType")
+        ),
+        skin_temperature_deviation_c=skin_temperature,
+        skin_temperature_calibration_days=_integer(root.get("skinTempCalibrationDays")),
+        skin_temperature_basis=(SKIN_TEMPERATURE_BASIS if skin_temperature is not None else None),
+        body_battery_change=_integer(
+            root.get("bodyBatteryChange")
+            if root.get("bodyBatteryChange") is not None
+            else data.get("bodyBatteryChange")
+        ),
+        sleep_score_feedback=_text(_first(score_feedback, "feedback", "qualifierKey", "quality")),
     )
 
 
@@ -223,7 +267,12 @@ def normalize_training_readiness(raw: Any, date: str) -> TrainingReadiness:
         sleep_score=_integer(data.get("sleepScore")),
         hrv_factor_percent=_number(_first(data, "hrvFactorPercent", "hrvFactor")),
         acute_load_factor_percent=_number(
-            _first(data, "acuteLoadFactorPercent", "acuteLoadFactor")
+            _first(
+                data,
+                "acwrFactorPercent",
+                "acuteLoadFactorPercent",
+                "acuteLoadFactor",
+            )
         ),
         sleep_history_factor_percent=_number(
             _first(data, "sleepHistoryFactorPercent", "sleepHistoryFactor")
@@ -232,6 +281,13 @@ def normalize_training_readiness(raw: Any, date: str) -> TrainingReadiness:
             _first(data, "stressHistoryFactorPercent", "stressHistoryFactor")
         ),
         recovery_time_minutes=_integer(_first(data, "recoveryTime", "recoveryTimeMinutes")),
+        hrv_factor_feedback=_text(data.get("hrvFactorFeedback")),
+        acute_load_factor_feedback=_text(data.get("acwrFactorFeedback")),
+        sleep_history_factor_feedback=_text(data.get("sleepHistoryFactorFeedback")),
+        sleep_score_factor_feedback=_text(data.get("sleepScoreFactorFeedback")),
+        stress_history_factor_feedback=_text(data.get("stressHistoryFactorFeedback")),
+        recovery_time_factor_feedback=_text(data.get("recoveryTimeFactorFeedback")),
+        recovery_time_change_phrase=_text(data.get("recoveryTimeChangePhrase")),
     )
 
 
@@ -248,9 +304,7 @@ def normalize_body_battery(
         return BodyBatterySummary(
             date=date,
             availability=[
-                body_battery_notice(
-                    DATE_MISMATCH if entries else MISSING_OR_UNSUPPORTED, date
-                )
+                body_battery_notice(DATE_MISMATCH if entries else MISSING_OR_UNSUPPORTED, date)
             ],
         )
     data = matching[0]
@@ -311,9 +365,7 @@ def normalize_activity(raw: Any) -> ActivitySummary:
         calories_kcal=_number(_first(data, "calories", "caloriesKcal")),
         average_hr_bpm=_number(_first(data, "averageHR", "averageHeartRate")),
         max_hr_bpm=_number(_first(data, "maxHR", "maxHeartRate")),
-        average_speed_mps=_rounded(
-            _first(data, "averageSpeed", "averageSpeedMetersPerSecond"), 3
-        ),
+        average_speed_mps=_rounded(_first(data, "averageSpeed", "averageSpeedMetersPerSecond"), 3),
         elevation_gain_m=_rounded(_first(data, "elevationGain", "gainElevation"), 1),
         average_cadence=_number(
             _first(
@@ -325,6 +377,39 @@ def normalize_activity(raw: Any) -> ActivitySummary:
             )
         ),
         average_power_w=_number(_first(data, "avgPower", "averagePower")),
+        moving_duration_seconds=_rounded(
+            _first(data, "movingDuration", "movingDurationSeconds"), 2
+        ),
+        average_moving_speed_mps=_rounded(data.get("averageMovingSpeed"), 3),
+        elevation_loss_m=_rounded(data.get("elevationLoss"), 1),
+        average_stride_length_m=_rounded(_first(data, "avgStrideLength", "averageStrideLength"), 3),
+        steps=_integer(data.get("steps")),
+        recovery_hr_bpm=_integer(_first(data, "recoveryHeartRate", "recoveryHR")),
+        average_respiration=_number(_first(data, "avgRespirationRate", "averageRespirationRate")),
+        lowest_respiration=_number(_first(data, "minRespirationRate", "lowestRespirationRate")),
+        highest_respiration=_number(_first(data, "maxRespirationRate", "highestRespirationRate")),
+        max_cadence=_number(_first(data, "maxRunCadence", "maxBikeCadence", "maxCadence")),
+        max_power_w=_number(_first(data, "maxPower", "maximumPower")),
+        normalized_power_w=_number(_first(data, "normPower", "normalizedPower")),
+        training_stress_score=_number(data.get("trainingStressScore")),
+        intensity_factor=_number(data.get("intensityFactor")),
+        activity_training_load=_rounded(data.get("activityTrainingLoad"), 1),
+        vo2_max=_rounded(_first(data, "vO2MaxValue", "vo2MaxValue", "vo2Max"), 1),
+        moderate_intensity_minutes=_integer(data.get("moderateIntensityMinutes")),
+        vigorous_intensity_minutes=_integer(data.get("vigorousIntensityMinutes")),
+        aerobic_training_effect=_rounded(
+            _first(data, "aerobicTrainingEffect", "trainingEffect"), 1
+        ),
+        anaerobic_training_effect=_rounded(data.get("anaerobicTrainingEffect"), 1),
+        training_effect_label=_text(
+            _first(data, "aerobicTrainingEffectMessage", "trainingEffectLabel")
+        ),
+        hr_zones_seconds={
+            f"zone_{zone}": seconds
+            for zone in range(1, 6)
+            if (seconds := _number(data.get(f"hrTimeInZone_{zone}"))) is not None
+        }
+        or None,
     )
 
 
@@ -368,6 +453,16 @@ def normalize_activity_detail(
     # metrics in summaryDTO. Merge both shapes instead of discarding root fields.
     summary_data = {**data, **nested_summary} if nested_summary else data
     summary = normalize_activity(summary_data)
+    # List summaries expose these aggregates directly. ActivityDetail already has dedicated
+    # top-level fields for them, so avoid sending the same values twice on detail reads.
+    detail_summary = summary.model_copy(
+        update={
+            "aerobic_training_effect": None,
+            "anaerobic_training_effect": None,
+            "training_effect_label": None,
+            "hr_zones_seconds": None,
+        }
+    )
     lap_items = _list(laps_raw) or _list(data.get("lapDTOs"))
     laps = [
         ActivityLap(
@@ -383,7 +478,7 @@ def normalize_activity_detail(
         for item_map in (_map(item) for item in lap_items[:MAX_ACTIVITY_LAPS])
     ]
     return ActivityDetail(
-        summary=summary,
+        summary=detail_summary,
         training_effect_aerobic=_rounded(
             _first(summary_data, "aerobicTrainingEffect", "trainingEffect"), 1
         ),
@@ -471,31 +566,229 @@ def normalize_training_load(
     """Extract only the documented/observed aggregate training fields."""
     phrase = _status_phrase(status_raw)
     code = _status_code(status_raw)
-    unlabeled_code = (
-        [] if phrase is not None or code is None else [unlabeled_status_notice(code)]
-    )
+    unlabeled_code = [] if phrase is not None or code is None else [unlabeled_status_notice(code)]
     return TrainingLoad(
         date=date,
         training_status=phrase,
         training_status_code=code,
         # ``monthlyLoad`` is deliberately not accepted here: it is a different Garmin metric on a
         # different window, and substituting it would silently mislabel the acute load.
-        acute_load=_rounded(_find_value(status_raw, ("acuteTrainingLoad", "acuteLoad")), 1),
+        acute_load=_rounded(
+            _find_value(
+                status_raw,
+                ("dailyTrainingLoadAcute", "acuteTrainingLoad", "acuteLoad"),
+            ),
+            1,
+        ),
         load_ratio=_rounded(
-            _find_value(status_raw, ("acuteChronicWorkloadRatio", "loadRatio")), 2
+            _find_value(
+                status_raw,
+                ("dailyAcuteChronicWorkloadRatio", "acuteChronicWorkloadRatio", "loadRatio"),
+            ),
+            2,
         ),
         vo2_max=_rounded(
             _find_value(max_metrics_raw, ("vo2MaxPreciseValue", "vo2MaxValue", "vo2Max")), 1
         ),
-        endurance_score=_rounded(
-            _find_value(endurance_raw, ("overallScore", "enduranceScore")), 1
-        ),
+        endurance_score=_rounded(_find_value(endurance_raw, ("overallScore", "enduranceScore")), 1),
         hill_score=_rounded(_find_value(hill_raw, ("overallScore", "hillScore")), 1),
+        chronic_load=_rounded(_find_value(status_raw, ("dailyTrainingLoadChronic",)), 1),
+        acwr_percent=_rounded(_find_value(status_raw, ("acwrPercent",)), 1),
+        acwr_status=_text(_find_value(status_raw, ("acwrStatus",))),
+        acwr_feedback=_text(_find_value(status_raw, ("acwrStatusFeedback",))),
+        optimal_load_min=_rounded(_find_value(status_raw, ("loadTunnelMin",)), 1),
+        optimal_load_max=_rounded(_find_value(status_raw, ("loadTunnelMax",)), 1),
+        weekly_load=_rounded(_find_value(status_raw, ("weeklyTrainingLoad",)), 1),
+        low_aerobic_load=_rounded(_find_value(status_raw, ("monthlyLoadAerobicLow",)), 1),
+        low_aerobic_target_min=_rounded(
+            _find_value(status_raw, ("monthlyLoadAerobicLowTargetMin",)), 1
+        ),
+        low_aerobic_target_max=_rounded(
+            _find_value(status_raw, ("monthlyLoadAerobicLowTargetMax",)), 1
+        ),
+        high_aerobic_load=_rounded(_find_value(status_raw, ("monthlyLoadAerobicHigh",)), 1),
+        high_aerobic_target_min=_rounded(
+            _find_value(status_raw, ("monthlyLoadAerobicHighTargetMin",)), 1
+        ),
+        high_aerobic_target_max=_rounded(
+            _find_value(status_raw, ("monthlyLoadAerobicHighTargetMax",)), 1
+        ),
+        anaerobic_load=_rounded(_find_value(status_raw, ("monthlyLoadAnaerobic",)), 1),
+        anaerobic_target_min=_rounded(
+            _find_value(status_raw, ("monthlyLoadAnaerobicTargetMin",)), 1
+        ),
+        anaerobic_target_max=_rounded(
+            _find_value(status_raw, ("monthlyLoadAnaerobicTargetMax",)), 1
+        ),
+        load_focus_feedback=_text(_find_value(status_raw, ("trainingBalanceFeedbackPhrase",))),
+        heat_acclimation_percent=_rounded(
+            _find_value(status_raw, ("heatAcclimationPercentage", "heatAcclimationPercent")), 1
+        ),
+        altitude_acclimation_percent=_rounded(
+            _find_value(
+                status_raw,
+                (
+                    "altitudeAcclimationPercentage",
+                    "altitudeAcclimationPercent",
+                    "altitudeAcclimation",
+                ),
+            ),
+            1,
+        ),
         availability=[
             *unlabeled_code,
             *(unavailable_source_notice(source) for source in unavailable_sources),
         ],
     )
+
+
+def normalize_training_zones(hr_raw: Any, power_raw: Any) -> TrainingZones:
+    """Normalize only profile thresholds; percentages and inferred ceilings are excluded."""
+    heart_rate: list[HeartRateZoneProfile] = []
+    for item in _list(hr_raw):
+        data = _map(item)
+        floors = {
+            f"zone_{zone}": value
+            for zone in range(1, 6)
+            if (value := _integer(data.get(f"zone{zone}Floor"))) is not None
+        }
+        heart_rate.append(
+            HeartRateZoneProfile(
+                sport=_text(data.get("sport")),
+                training_method=_text(data.get("trainingMethod")),
+                max_heart_rate_bpm=_integer(data.get("maxHeartRateUsed")),
+                resting_heart_rate_bpm=_integer(data.get("restingHeartRateUsed")),
+                lactate_threshold_heart_rate_bpm=_integer(
+                    data.get("lactateThresholdHeartRateUsed")
+                ),
+                zone_floors_bpm=floors,
+            )
+        )
+    power: list[PowerZoneProfile] = []
+    for item in _list(power_raw):
+        data = _map(item)
+        floors = {
+            f"zone_{zone}": value
+            for zone in range(1, 8)
+            if (value := _integer(data.get(f"zone{zone}Floor"))) is not None
+        }
+        power.append(
+            PowerZoneProfile(
+                sport=_text(data.get("sport")),
+                functional_threshold_power_w=_integer(data.get("functionalThresholdPower")),
+                zone_floors_w=floors,
+            )
+        )
+    notices: list[AvailabilityNotice] = []
+    for field, values in (("heart_rate", heart_rate), ("power", power)):
+        if not values:
+            notices.append(
+                AvailabilityNotice(
+                    field=field,
+                    status=MISSING_OR_UNSUPPORTED,
+                    message=f"Garmin returned no {field.replace('_', ' ')} zone profile.",
+                )
+            )
+    return TrainingZones(heart_rate=heart_rate, power=power, availability=notices)
+
+
+def normalize_running_tolerance(raw: Any, start_date: str, end_date: str) -> RunningTolerance:
+    points: list[RunningTolerancePoint] = []
+    for item in _list(raw):
+        data = _map(item)
+        cdate = _text(data.get("calendarDate"))
+        if cdate is None or not start_date <= cdate <= end_date:
+            continue
+        points.append(
+            RunningTolerancePoint(
+                date=cdate,
+                acute_distance_m=_rounded(data.get("acuteDistance"), 1),
+                acute_impact_load=_rounded(data.get("acuteImpactLoad"), 1),
+                acute_tolerance=_rounded(data.get("acuteTolerance"), 1),
+                feedback=_text(data.get("runningToleranceFeedBackPhrase")),
+            )
+        )
+    return RunningTolerance(
+        start_date=start_date,
+        end_date=end_date,
+        points=sorted(points, key=lambda point: point.date),
+        availability=(
+            []
+            if points
+            else [
+                AvailabilityNotice(
+                    field="running_tolerance",
+                    status=MISSING_OR_UNSUPPORTED,
+                    message="Garmin returned no running-tolerance data in this range.",
+                )
+            ]
+        ),
+    )
+
+
+def normalize_sleep_range(raw: Any) -> dict[str, SleepSummary]:
+    """Normalize Garmin's compact sleep history without pretending it is a full sleep read."""
+    result: dict[str, SleepSummary] = {}
+    for item in _list(raw):
+        root = _map(item)
+        cdate = _text(root.get("calendarDate"))
+        data = _map(root.get("values"))
+        if cdate is None:
+            continue
+        result[cdate] = SleepSummary(
+            date=cdate,
+            sleep_score=_integer(data.get("sleepScore")),
+            total_sleep_seconds=_integer(data.get("totalSleepTimeInSeconds")),
+            deep_sleep_seconds=_integer(data.get("deepTime")),
+            light_sleep_seconds=_integer(data.get("lightTime")),
+            rem_sleep_seconds=_integer(data.get("remTime")),
+            awake_seconds=_integer(data.get("awakeTime")),
+            average_respiration=_number(data.get("respiration")),
+            average_spo2_percent=_number(data.get("spO2")),
+            average_hr_bpm=_number(data.get("avgHeartRate")),
+            sleep_need_minutes=_integer(data.get("sleepNeed")),
+            sleep_alignment_status=_text(data.get("sleepAlignmentStatus")),
+            # Verified against avgSkinTempDeviationC from the single-night response.
+            skin_temperature_deviation_c=_rounded(data.get("skinTempC"), 2),
+            skin_temperature_basis=(
+                SKIN_TEMPERATURE_BASIS if data.get("skinTempC") is not None else None
+            ),
+            body_battery_change=_integer(data.get("bodyBatteryChange")),
+        )
+    return result
+
+
+def normalize_hrv_range(raw: Any) -> dict[str, HrvSummary]:
+    root = _map(raw)
+    entries = _list(root.get("hrvSummaries")) if root else _list(raw)
+    result: dict[str, HrvSummary] = {}
+    for item in entries:
+        data = _map(item)
+        cdate = _text(data.get("calendarDate"))
+        if cdate is not None:
+            result[cdate] = normalize_hrv(data, cdate)
+    return result
+
+
+def normalize_resting_hr_range(raw: Any) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for item in _list(raw):
+        data = _map(item)
+        cdate = _text(data.get("calendarDate"))
+        value = _integer(data.get("value"))
+        if cdate is not None and value is not None:
+            result[cdate] = value
+    return result
+
+
+def normalize_body_battery_range(raw: Any) -> dict[str, BodyBatterySummary]:
+    result: dict[str, BodyBatterySummary] = {}
+    for item in _list(raw):
+        data = _map(item)
+        cdate = _text(data.get("date"))
+        if cdate is not None:
+            result[cdate] = normalize_body_battery([data], cdate)
+    return result
 
 
 _CYCLE_PHASES = {
@@ -551,9 +844,7 @@ def normalize_cycle(raw_day: Any, raw_calendar: Any, date: str) -> CycleSummary:
             )
         )
     if not summary:
-        availability.append(
-            cycle_notices("unsupported_or_not_configured", date)[0]
-        )
+        availability.append(cycle_notices("unsupported_or_not_configured", date)[0])
     return CycleSummary(
         date=date,
         phase=_CYCLE_PHASES.get(phase_code) if phase_code is not None else None,

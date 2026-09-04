@@ -43,14 +43,20 @@ from .normalize import (
     normalize_activities,
     normalize_activity_detail,
     normalize_body_battery,
+    normalize_body_battery_range,
     normalize_body_composition,
     normalize_cycle,
     normalize_daily_summary,
     normalize_hrv,
+    normalize_hrv_range,
+    normalize_resting_hr_range,
+    normalize_running_tolerance,
     normalize_sleep,
+    normalize_sleep_range,
     normalize_stress,
     normalize_training_load,
     normalize_training_readiness,
+    normalize_training_zones,
 )
 from .notices import (
     MISSING_OR_UNSUPPORTED,
@@ -139,9 +145,7 @@ def _zone_availability(hr_zones: Any, power_zones: Any) -> list[AvailabilityNoti
     return notices
 
 
-def _sum_present(
-    values: Iterable[float | None], *, digits: int = 2
-) -> tuple[float | None, int]:
+def _sum_present(values: Iterable[float | None], *, digits: int = 2) -> tuple[float | None, int]:
     """Sum only the values Garmin actually reported, and count them.
 
     Returns ``None`` rather than ``0`` when nothing reported the metric, so that "no activity
@@ -161,9 +165,7 @@ class GarminTools:
         # Explicitly injected clients are normally unit-test fakes. Caching is opt-in there;
         # production construction always uses the local normalized database.
         self.database = (
-            database
-            if database is not None
-            else (GarminDatabase() if client is None else None)
+            database if database is not None else (GarminDatabase() if client is None else None)
         )
         self.sync = SyncEngine(self.client, self.database) if self.database is not None else None
 
@@ -267,9 +269,7 @@ class GarminTools:
         except GarminOwlError as exc:
             status = _FAILURE_STATUS.get(type(exc), RETRIEVAL_FAILED)
             notices.append(
-                AvailabilityNotice(
-                    field=field, status=status, message=_FAILURE_MESSAGE[status]
-                )
+                AvailabilityNotice(field=field, status=status, message=_FAILURE_MESSAGE[status])
             )
             return None
 
@@ -282,9 +282,7 @@ class GarminTools:
         # Each component stays separate and Garmin-sourced; no proprietary score is calculated.
         return RecoverySummary(
             date=cdate,
-            sleep=self._component(
-                "sleep", lambda: SleepSummary(**self.get_sleep(cdate)), notices
-            ),
+            sleep=self._component("sleep", lambda: SleepSummary(**self.get_sleep(cdate)), notices),
             hrv=self._component("hrv", lambda: HrvSummary(**self.get_hrv(cdate)), notices),
             body_battery=self._component(
                 "body_battery",
@@ -323,8 +321,7 @@ class GarminTools:
         if self.database is not None and self.sync is not None:
             self.sync.ensure_activities(start, end)
             return [
-                item.compact()
-                for item in self.database.list_activities(start, end, limit=limit)
+                item.compact() for item in self.database.list_activities(start, end, limit=limit)
             ]
         raw = self.client.activities(start, end, limit)
         return [_compact(item) for item in normalize_activities(raw, limit)]
@@ -412,6 +409,26 @@ class GarminTools:
         item = self.database.get_training_load(cdate)
         return item.compact() if item is not None else {"date": cdate}
 
+    def get_training_zones(self) -> dict[str, Any]:
+        """Return Garmin's configured HR and power thresholds without inferred ceilings."""
+        heart_rate, power = self.client.training_zones()
+        return normalize_training_zones(heart_rate, power).compact()
+
+    def get_running_tolerance(self, days: int = 28, end_date: str | None = None) -> dict[str, Any]:
+        if isinstance(days, bool) or not 1 <= days <= 90:
+            raise ValueError("days must be between 1 and 90")
+        end = parse_date(end_date)
+        start = end - timedelta(days=days - 1)
+        try:
+            raw = self.client.running_tolerance(start.isoformat(), end.isoformat())
+        except GarminOwlMissingDataError:
+            raw = None
+        return normalize_running_tolerance(
+            raw,
+            start.isoformat(),
+            end.isoformat(),
+        ).compact()
+
     def _recovery_trend(self, days: int, end: date) -> RecoveryTrend:
         if days not in {7, 14, 28} or isinstance(days, bool):
             raise ValueError("days must be one of 7, 14, or 28")
@@ -419,11 +436,111 @@ class GarminTools:
         requested = dates_between(start, end)
         if self.database is None or self.sync is None:
             raise RuntimeError("recovery trends require the local normalized cache")
-        for cdate in requested:
-            for resource in ("daily", "sleep", "hrv", "readiness"):
-                self.sync.ensure_resource(resource, cdate)
         rows = self.database.recovery_rows(start.isoformat(), end.isoformat())
-        by_date = {str(row["date"]): row for row in rows}
+        by_date = {str(row["date"]): dict(row) for row in rows}
+        availability: list[AvailabilityNotice] = []
+
+        def missing(field: str) -> bool:
+            return any(by_date.get(cdate, {}).get(field) is None for cdate in requested)
+
+        def range_read(field: str, read: Callable[[], Any]) -> Any:
+            try:
+                return read()
+            except GarminOwlMissingDataError:
+                availability.append(
+                    AvailabilityNotice(
+                        field=field,
+                        status=MISSING_OR_UNSUPPORTED,
+                        message=f"Garmin returned no {field.replace('_', ' ')} range data.",
+                    )
+                )
+                return None
+
+        if missing("sleep_score") or missing("skin_temperature_deviation_c"):
+            sleep_days = normalize_sleep_range(
+                range_read(
+                    "sleep",
+                    lambda: self.client.sleep_range(start.isoformat(), end.isoformat()),
+                )
+            )
+            for cdate, sleep in sleep_days.items():
+                row = by_date.setdefault(cdate, {"date": cdate})
+                for field, value in (
+                    ("sleep_score", sleep.sleep_score),
+                    ("average_hr_bpm", sleep.average_hr_bpm),
+                    ("skin_temperature_deviation_c", sleep.skin_temperature_deviation_c),
+                    ("body_battery_change", sleep.body_battery_change),
+                ):
+                    if row.get(field) is None:
+                        row[field] = value
+        if missing("nightly_avg_ms") and missing("last_night_avg_ms"):
+            hrv_days = normalize_hrv_range(
+                range_read(
+                    "hrv",
+                    lambda: self.client.hrv_range(start.isoformat(), end.isoformat()),
+                )
+            )
+            for cdate, hrv in hrv_days.items():
+                row = by_date.setdefault(cdate, {"date": cdate})
+                for field, value in (
+                    ("nightly_avg_ms", hrv.nightly_average_ms),
+                    ("last_night_avg_ms", hrv.last_night_average_ms),
+                    ("weekly_avg_ms", hrv.weekly_average_ms),
+                ):
+                    if row.get(field) is None:
+                        row[field] = value
+        if missing("resting_hr_bpm"):
+            resting_days = normalize_resting_hr_range(
+                range_read(
+                    "resting_hr",
+                    lambda: self.client.resting_hr_range(start.isoformat(), end.isoformat()),
+                )
+            )
+            for cdate, value in resting_days.items():
+                by_date.setdefault(cdate, {"date": cdate}).setdefault("resting_hr_bpm", value)
+        if missing("body_battery_charged") or missing("body_battery_drained"):
+            battery_days = normalize_body_battery_range(
+                range_read(
+                    "body_battery",
+                    lambda: self.client.body_battery_range(start.isoformat(), end.isoformat()),
+                )
+            )
+            for cdate, battery in battery_days.items():
+                row = by_date.setdefault(cdate, {"date": cdate})
+                if row.get("body_battery_charged") is None:
+                    row["body_battery_charged"] = battery.charged
+                if row.get("body_battery_drained") is None:
+                    row["body_battery_drained"] = battery.drained
+        for cdate in requested:
+            row = by_date.setdefault(cdate, {"date": cdate})
+            if row.get("training_readiness") is not None:
+                continue
+            try:
+                readiness = normalize_training_readiness(
+                    self.client.training_readiness(cdate), cdate
+                )
+            except GarminOwlMissingDataError:
+                continue
+            row["training_readiness"] = readiness.score
+            row["recovery_time_minutes"] = readiness.recovery_time_minutes
+        point_fields = (
+            "sleep_score",
+            "nightly_avg_ms",
+            "last_night_avg_ms",
+            "weekly_avg_ms",
+            "resting_hr_bpm",
+            "training_readiness",
+            "body_battery_charged",
+            "body_battery_drained",
+            "body_battery_change",
+            "average_hr_bpm",
+            "skin_temperature_deviation_c",
+        )
+
+        def has_data(cdate: str) -> bool:
+            row = by_date.get(cdate, {})
+            return any(row.get(field) is not None for field in point_fields)
+
         # The installed python-garminconnect models hrvSummary with weeklyAvg and lastNightAvg
         # and no nightlyAverage, so nightly_avg_ms is null for current accounts. Fall back to
         # Garmin's lastNightAvg -- the same per-night average under the key Garmin actually
@@ -431,38 +548,40 @@ class GarminTools:
         fallback_dates = [
             cdate
             for cdate in requested
-            if cdate in by_date
-            and by_date[cdate]["nightly_avg_ms"] is None
-            and by_date[cdate]["last_night_avg_ms"] is not None
+            if has_data(cdate)
+            and by_date[cdate].get("nightly_avg_ms") is None
+            and by_date[cdate].get("last_night_avg_ms") is not None
         ]
         points = [
             DailyRecoveryPoint(
                 date=cdate,
-                sleep_score=by_date[cdate]["sleep_score"],
+                sleep_score=by_date[cdate].get("sleep_score"),
                 hrv_nightly_average_ms=(
-                    by_date[cdate]["nightly_avg_ms"]
-                    if by_date[cdate]["nightly_avg_ms"] is not None
-                    else by_date[cdate]["last_night_avg_ms"]
+                    by_date[cdate].get("nightly_avg_ms")
+                    if by_date[cdate].get("nightly_avg_ms") is not None
+                    else by_date[cdate].get("last_night_avg_ms")
                 ),
-                hrv_weekly_average_ms=by_date[cdate]["weekly_avg_ms"],
-                resting_hr_bpm=by_date[cdate]["resting_hr_bpm"],
-                training_readiness=by_date[cdate]["training_readiness"],
+                hrv_weekly_average_ms=by_date[cdate].get("weekly_avg_ms"),
+                resting_hr_bpm=by_date[cdate].get("resting_hr_bpm"),
+                training_readiness=by_date[cdate].get("training_readiness"),
                 recovery_time_hours=(
                     round(by_date[cdate]["recovery_time_minutes"] / 60, 1)
-                    if by_date[cdate]["recovery_time_minutes"] is not None
+                    if by_date[cdate].get("recovery_time_minutes") is not None
                     else None
                 ),
-                body_battery_charged=by_date[cdate]["body_battery_charged"],
-                body_battery_drained=by_date[cdate]["body_battery_drained"],
+                body_battery_charged=by_date[cdate].get("body_battery_charged"),
+                body_battery_drained=by_date[cdate].get("body_battery_drained"),
+                body_battery_change_during_sleep=by_date[cdate].get("body_battery_change"),
+                average_sleep_hr_bpm=by_date[cdate].get("average_hr_bpm"),
+                skin_temperature_deviation_c=by_date[cdate].get("skin_temperature_deviation_c"),
             )
             for cdate in requested
-            if cdate in by_date
+            if has_data(cdate)
         ]
         current_date = end.isoformat()
         current_point = next((point for point in points if point.date == current_date), None)
         baseline_points = [point for point in points if point.date < current_date]
         metrics: list[TrendMetric] = []
-        availability: list[AvailabilityNotice] = []
         for field, label in (
             ("sleep_score", "sleep_score"),
             ("hrv_nightly_average_ms", "hrv_nightly_average_ms"),
@@ -470,6 +589,9 @@ class GarminTools:
             ("training_readiness", "training_readiness"),
             ("body_battery_charged", "body_battery_charged"),
             ("body_battery_drained", "body_battery_drained"),
+            ("body_battery_change_during_sleep", "body_battery_change_during_sleep"),
+            ("average_sleep_hr_bpm", "average_sleep_hr_bpm"),
+            ("skin_temperature_deviation_c", "skin_temperature_deviation_c"),
         ):
             samples = [
                 (point.date, float(value))
@@ -494,7 +616,9 @@ class GarminTools:
                     ),
                     percent_difference=(
                         round((float(current_value) / baseline_average - 1) * 100, 1)
-                        if current_value is not None and baseline_average
+                        if label != "skin_temperature_deviation_c"
+                        and current_value is not None
+                        and baseline_average
                         else None
                     ),
                     sample_days=len(values),
@@ -532,6 +656,17 @@ class GarminTools:
             )
         availability.append(
             AvailabilityNotice(
+                field="skin_temperature_deviation_c",
+                status="garmin_baseline_deviation",
+                message=(
+                    "Garmin's deviation from the user's calibrated personal skin-temperature "
+                    "baseline, not absolute or core body temperature. Percent difference is "
+                    "omitted because this metric is already a signed deviation."
+                ),
+            )
+        )
+        availability.append(
+            AvailabilityNotice(
                 field="hrv_weekly_average_ms",
                 status="series_only_no_deviation",
                 message=(
@@ -548,9 +683,8 @@ class GarminTools:
                 field="body_battery_charged",
                 status="whole_day_total",
                 message=(
-                    "Garmin's whole-day Body Battery charge and drain totals from the daily "
-                    "summary. These are not an overnight recharge figure; Garmin does not "
-                    "return one, and garmin-owl does not derive it here."
+                    "Garmin's whole-day Body Battery charge and drain totals. The separate "
+                    "body_battery_change_during_sleep field is Garmin's overnight change."
                 ),
             )
         )
@@ -558,7 +692,7 @@ class GarminTools:
             days=days,
             points=points,
             metrics=metrics,
-            missing_dates=[cdate for cdate in requested if cdate not in by_date],
+            missing_dates=[cdate for cdate in requested if not has_data(cdate)],
             availability=availability,
         )
 
@@ -621,8 +755,8 @@ class GarminTools:
                     "training_effect",
                     effect_count,
                     len(items),
-                    "Training-effect maxima cover only activities whose Garmin detail was "
-                    "fetched and reported a training effect.",
+                    "Training-effect maxima cover only activities for which Garmin reported "
+                    "a training effect.",
                 )
             )
         if hr_count < len(items):
@@ -662,13 +796,17 @@ class GarminTools:
         if len(set(activity_ids)) != len(activity_ids):
             raise ValueError("activity_ids must be unique")
         details = [
-            ActivityDetail(**self.get_activity(validate_activity_id(item)))
-            for item in activity_ids
+            ActivityDetail(**self.get_activity(validate_activity_id(item))) for item in activity_ids
         ]
         deltas: list[ComparisonDelta] = []
         for field in (
-            "duration_seconds", "distance_m", "average_hr_bpm", "average_speed_mps",
-            "elevation_gain_m", "average_cadence", "average_power_w",
+            "duration_seconds",
+            "distance_m",
+            "average_hr_bpm",
+            "average_speed_mps",
+            "elevation_gain_m",
+            "average_cadence",
+            "average_power_w",
         ):
             values = {
                 str(detail.summary.activity_id): getattr(detail.summary, field)
@@ -707,9 +845,7 @@ class GarminTools:
             daily=self._component(
                 "daily_summary", lambda: DailySummary(**self.get_daily_summary(cdate)), notices
             ),
-            sleep=self._component(
-                "sleep", lambda: SleepSummary(**self.get_sleep(cdate)), notices
-            ),
+            sleep=self._component("sleep", lambda: SleepSummary(**self.get_sleep(cdate)), notices),
             hrv=self._component("hrv", lambda: HrvSummary(**self.get_hrv(cdate)), notices),
             readiness=self._component(
                 "training_readiness",
@@ -732,7 +868,7 @@ class GarminTools:
                     field="interpretation",
                     status="not_provided",
                     message="The caller should interpret these facts in context.",
-                )
+                ),
             ],
         ).compact()
 

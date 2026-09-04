@@ -12,10 +12,13 @@ from garmin_owl.normalize import (
     normalize_cycle,
     normalize_daily_summary,
     normalize_hrv,
+    normalize_running_tolerance,
     normalize_sleep,
+    normalize_sleep_range,
     normalize_stress,
     normalize_training_load,
     normalize_training_readiness,
+    normalize_training_zones,
 )
 
 DATE = "2026-08-30"
@@ -70,6 +73,47 @@ def test_sleep_handles_nested_partial_response() -> None:
     }
 
 
+def test_sleep_exposes_recovery_fields_and_skin_temperature_deviation() -> None:
+    result = normalize_sleep(
+        {
+            "dailySleepDTO": {
+                "avgHeartRate": 51.5,
+                "avgSleepStress": 14,
+                "napTimeSeconds": 1200,
+                "awakeCount": 3,
+            },
+            "restlessMomentsCount": 9,
+            "avgSkinTempDeviationC": 0.42,
+            "skinTempCalibrationDays": 7,
+            "bodyBatteryChange": 38,
+            "sleepNeed": {"actual": 490, "baseline": 480, "feedback": "MORE_SLEEP"},
+        },
+        DATE,
+    ).compact()
+    assert result["skin_temperature_deviation_c"] == 0.42
+    assert result["average_hr_bpm"] == 51.5
+    assert result["body_battery_change"] == 38
+    assert result["sleep_need_minutes"] == 490
+
+
+def test_compact_sleep_range_maps_the_same_temperature_deviation() -> None:
+    result = normalize_sleep_range(
+        [
+            {
+                "calendarDate": DATE,
+                "values": {
+                    "sleepScore": 82,
+                    "avgHeartRate": 50,
+                    "skinTempC": -0.18,
+                    "bodyBatteryChange": 41,
+                },
+            }
+        ]
+    )[DATE].compact()
+    assert result["skin_temperature_deviation_c"] == -0.18
+    assert result["body_battery_change"] == 41
+
+
 def test_unexpected_shapes_degrade_to_date_only() -> None:
     assert normalize_daily_summary(["changed"], DATE).compact() == {"date": DATE}
     assert normalize_sleep("changed", DATE).compact() == {"date": DATE}
@@ -114,12 +158,16 @@ def test_training_readiness_prefers_morning_snapshot() -> None:
                 "inputContext": "AFTER_WAKEUP_RESET",
                 "timestampLocal": "2026-08-30T07:00:00",
                 "recoveryTime": 180,
+                "acwrFactorPercent": 74,
+                "acwrFactorFeedback": "OPTIMAL",
             },
         ],
         DATE,
     ).compact()
     assert result["score"] == 66
     assert result["recovery_time_minutes"] == 180
+    assert result["acute_load_factor_percent"] == 74
+    assert result["acute_load_factor_feedback"] == "OPTIMAL"
 
 
 def test_activity_detail_excludes_streams_and_location() -> None:
@@ -197,6 +245,49 @@ def test_walking_activity_merges_root_identity_with_summary_dto() -> None:
     assert "training_effect_anaerobic" not in result
 
 
+def test_activity_list_enriches_walking_cardio_and_cycling_metrics() -> None:
+    [walking, cardio, cycling] = normalize_activities(
+        [
+            {
+                "activityId": 1,
+                "activityType": {"typeKey": "walking"},
+                "movingDuration": 900,
+                "averageMovingSpeed": 1.4,
+                "avgStrideLength": 0.72,
+                "steps": 1500,
+                "recoveryHeartRate": 88,
+                "hrTimeInZone_2": 420,
+            },
+            {
+                "activityId": 2,
+                "activityType": {"typeKey": "cardio"},
+                "avgRespirationRate": 20.5,
+                "maxRespirationRate": 31,
+                "activityTrainingLoad": 42.2,
+                "trainingEffect": 2.4,
+            },
+            {
+                "activityId": 3,
+                "activityType": {"typeKey": "cycling"},
+                "averageBikingCadenceInRevPerMinute": 82,
+                "maxBikeCadence": 109,
+                "avgPower": 180,
+                "normPower": 195,
+                "trainingStressScore": 61,
+                "intensityFactor": 0.78,
+            },
+        ],
+        3,
+    )
+    assert walking.compact()["hr_zones_seconds"] == {"zone_2": 420.0}
+    assert walking.average_stride_length_m == 0.72
+    assert cardio.average_respiration == 20.5
+    assert cardio.aerobic_training_effect == 2.4
+    assert cycling.average_cadence == 82
+    assert cycling.normalized_power_w == 195
+    assert cycling.training_stress_score == 61
+
+
 def test_invalid_activity_entries_are_skipped() -> None:
     result = normalize_activities([{"name": "missing id"}, {"activityId": 4}], 20)
     assert [item.activity_id for item in result] == [4]
@@ -244,11 +335,7 @@ def test_cycle_normalization_excludes_sensitive_day_log() -> None:
                 "sexualActivity": "private value",
             },
         },
-        {
-            "cycleSummaries": [
-                {"predictedCycle": True, "startDate": "2026-09-08"}
-            ]
-        },
+        {"cycleSummaries": [{"predictedCycle": True, "startDate": "2026-09-08"}]},
         DATE,
     ).compact()
     assert result["phase"] == "luteal"
@@ -291,13 +378,73 @@ def test_missing_body_battery_is_missing_not_unmatched() -> None:
 
 def test_training_load_keeps_acute_load_and_monthly_load_distinct() -> None:
     """``monthlyLoad`` is a different Garmin metric on a different window."""
-    result = normalize_training_load(
-        {"monthlyLoad": 900}, None, None, None, DATE
-    ).compact()
+    result = normalize_training_load({"monthlyLoad": 900}, None, None, None, DATE).compact()
     assert "acute_load" not in result
-    assert normalize_training_load({"acuteTrainingLoad": 300}, None, None, None, DATE).compact()[
-        "acute_load"
-    ] == 300
+    assert (
+        normalize_training_load({"acuteTrainingLoad": 300}, None, None, None, DATE).compact()[
+            "acute_load"
+        ]
+        == 300
+    )
+
+
+def test_training_load_accepts_current_garmin_acwr_and_load_focus_fields() -> None:
+    result = normalize_training_load(
+        {
+            "dailyTrainingLoadAcute": 321.4,
+            "dailyTrainingLoadChronic": 289.2,
+            "dailyAcuteChronicWorkloadRatio": 1.11,
+            "acwrPercent": 111,
+            "acwrStatus": "OPTIMAL",
+            "loadTunnelMin": 240,
+            "loadTunnelMax": 410,
+            "monthlyLoadAerobicLow": 500,
+            "monthlyLoadAerobicLowTargetMin": 450,
+            "trainingBalanceFeedbackPhrase": "BALANCED_1",
+        },
+        None,
+        None,
+        None,
+        DATE,
+    ).compact()
+    assert result["acute_load"] == 321.4
+    assert result["chronic_load"] == 289.2
+    assert result["load_ratio"] == 1.11
+    assert result["optimal_load_max"] == 410
+    assert result["low_aerobic_load"] == 500
+
+
+def test_training_zones_and_running_tolerance_are_explicit_garmin_scalars() -> None:
+    zones = normalize_training_zones(
+        [
+            {
+                "sport": "RUNNING",
+                "trainingMethod": "LTHR",
+                "maxHeartRateUsed": 190,
+                "zone1Floor": 110,
+                "zone5Floor": 170,
+            }
+        ],
+        [{"sport": "CYCLING", "functionalThresholdPower": 250, "zone1Floor": 100}],
+    ).compact()
+    assert zones["heart_rate"][0]["zone_floors_bpm"] == {"zone_1": 110, "zone_5": 170}
+    assert zones["power"][0]["functional_threshold_power_w"] == 250
+
+    tolerance = normalize_running_tolerance(
+        [
+            {
+                "calendarDate": DATE,
+                "acuteDistance": 12345.6,
+                "acuteImpactLoad": 44.2,
+                "acuteTolerance": 52.1,
+                "runningToleranceFeedBackPhrase": "BALANCED",
+            }
+        ],
+        DATE,
+        DATE,
+    ).compact()
+    assert tolerance["points"][0]["acute_distance_m"] == 12345.6
+    assert "injury-risk prediction" in tolerance["note"]
 
 
 def test_training_status_code_is_not_rendered_as_a_status_name() -> None:
@@ -349,9 +496,7 @@ def test_numeric_training_status_is_kept_as_a_code_not_a_label() -> None:
         result = normalize_training_load(raw, None, None, None, DATE).compact()
         assert result["training_status_code"] == 7
         assert "training_status" not in result
-        notice = next(
-            item for item in result["availability"] if item["field"] == "training_status"
-        )
+        notice = next(item for item in result["availability"] if item["field"] == "training_status")
         assert notice["status"] == "code_without_label"
         assert "7" in notice["message"]
 

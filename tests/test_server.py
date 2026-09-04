@@ -26,6 +26,8 @@ def test_server_registers_only_the_intended_read_tools() -> None:
         "get_recovery_trend",
         "get_training_week",
         "get_training_load",
+        "get_training_zones",
+        "get_running_tolerance",
         "get_recent_activities",
         "compare_activities",
         "get_cycle",

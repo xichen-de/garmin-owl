@@ -49,18 +49,18 @@ The bundle contains the project source but no credentials, tokens, or health dat
 
 ## Available tools
 
-17 read-only tools. There are no write tools.
+19 read-only tools. There are no write tools.
 
 **One day at a time**
 
 | Tool | Answers |
 | --- | --- |
-| `get_daily_summary` | Steps, distance, calories, HR, stress, floors, intensity minutes |
-| `get_sleep` | Sleep score, stages, timing, respiration, SpO2 |
+| `get_daily_summary` | Steps, activity/sedentary time, goals, calories, HR, stress, respiration, SpO2, Body Battery |
+| `get_sleep` | Sleep score/need, stages, timing, sleeping HR/stress, respiration, SpO2, Body Battery change, skin-temperature deviation |
 | `get_hrv` | HRV status, nightly and weekly averages |
 | `get_body_battery` | Charged, drained, and start/end/highest/lowest levels |
 | `get_stress` | Average and max stress, plus durations by intensity band |
-| `get_training_readiness` | Garmin's readiness score and its components |
+| `get_training_readiness` | Garmin's readiness score, components, and factor feedback |
 | `get_body_composition` | Weight and related measurements over a date range |
 | `get_cycle` | Cycle phase, day, and Garmin predictions |
 
@@ -68,19 +68,21 @@ The bundle contains the project source but no credentials, tokens, or health dat
 
 | Tool | Answers |
 | --- | --- |
-| `get_activities` | Activities in a date range (defaults to the last 14 days) |
+| `get_activities` | Activities in a date range, enriched for walking, cycling, and cardio (defaults to the last 14 days) |
 | `get_recent_activities` | Activities from the last N days, optionally filtered by type |
 | `get_activity` | One activity's laps, training effect, and HR/power zones |
 | `compare_activities` | Side-by-side metrics for 2–10 activities |
 | `get_training_week` | Mon–Sun totals and zone time, with per-metric coverage |
-| `get_training_load` | Training status, VO2 max, endurance, and hill scores |
+| `get_training_load` | Acute/chronic load, ratio/status, load focus/targets, VO2 max, endurance, hill, acclimation |
+| `get_training_zones` | Configured HR and cycling-power zone thresholds |
+| `get_running_tolerance` | Garmin running distance, impact load, tolerance, and feedback over 1–90 days |
 
 **Combined and trends**
 
 | Tool | Answers |
 | --- | --- |
 | `get_recovery` | Sleep, HRV, Body Battery, stress, RHR, and readiness for one day |
-| `get_recovery_trend` | Those metrics plus Body Battery across 7, 14, or 28 days |
+| `get_recovery_trend` | Sleep HR, skin-temperature deviation, HRV, RHR, readiness, and Body Battery across 7, 14, or 28 days |
 | `get_training_context` | Recovery plus the requested date's preceding training |
 
 ### How results are reported
@@ -182,8 +184,6 @@ To check whether a metric is reachable at all through reads `garmin-owl` is alre
 ```bash
 uv run python -m garmin_owl.diagnostic --find-keys 2026-08-31 temp
 ```
-
-For example, skin temperature is **not** supported: `python-garminconnect` exposes no skin temperature read as of 0.3.12. If a scan shows a temperature key inside a response `garmin-owl` already fetches, it can be normalized from that existing read without widening the allow-list.
 
 </details>
 

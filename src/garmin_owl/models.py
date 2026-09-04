@@ -6,6 +6,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+SKIN_TEMPERATURE_BASIS = (
+    "Garmin deviation from the user's calibrated personal skin-temperature baseline; "
+    "not absolute or core body temperature."
+)
+
 
 class OwlModel(BaseModel):
     """Base model that tolerates upstream drift while emitting compact JSON."""
@@ -49,6 +54,19 @@ class DailySummary(OwlModel):
     floors_descended: float | None = None
     moderate_intensity_minutes: int | None = None
     vigorous_intensity_minutes: int | None = None
+    active_seconds: int | None = None
+    highly_active_seconds: int | None = None
+    sedentary_seconds: int | None = None
+    daily_step_goal: int | None = None
+    intensity_minutes_goal: int | None = None
+    last_seven_days_avg_resting_hr_bpm: int | None = None
+    body_battery_during_sleep: int | None = None
+    body_battery_at_wake: int | None = None
+    average_waking_respiration: float | None = None
+    highest_respiration: float | None = None
+    lowest_respiration: float | None = None
+    average_spo2_percent: float | None = None
+    lowest_spo2_percent: float | None = None
     # Garmin's source field is a floor estimate, not metres; fractional values are retained.
     floors_unit: str | None = None
 
@@ -68,6 +86,22 @@ class SleepSummary(OwlModel):
     highest_respiration: float | None = None
     average_spo2_percent: float | None = None
     lowest_spo2_percent: float | None = None
+    average_hr_bpm: float | None = None
+    average_stress: float | None = None
+    nap_seconds: int | None = None
+    awake_count: int | None = None
+    restless_moments_count: int | None = None
+    sleep_need_minutes: int | None = None
+    sleep_need_baseline_minutes: int | None = None
+    sleep_need_feedback: str | None = None
+    sleep_alignment_status: str | None = None
+    # Garmin reports deviation from the user's calibrated skin-temperature baseline.
+    # This is not core body temperature.
+    skin_temperature_deviation_c: float | None = None
+    skin_temperature_calibration_days: int | None = None
+    skin_temperature_basis: str | None = None
+    body_battery_change: int | None = None
+    sleep_score_feedback: str | None = None
 
 
 class HrvSummary(OwlModel):
@@ -93,6 +127,13 @@ class TrainingReadiness(OwlModel):
     sleep_history_factor_percent: float | None = None
     stress_history_factor_percent: float | None = None
     recovery_time_minutes: int | None = None
+    hrv_factor_feedback: str | None = None
+    acute_load_factor_feedback: str | None = None
+    sleep_history_factor_feedback: str | None = None
+    sleep_score_factor_feedback: str | None = None
+    stress_history_factor_feedback: str | None = None
+    recovery_time_factor_feedback: str | None = None
+    recovery_time_change_phrase: str | None = None
 
 
 class BodyBatterySummary(OwlModel):
@@ -147,6 +188,28 @@ class ActivitySummary(OwlModel):
     elevation_gain_m: float | None = None
     average_cadence: float | None = None
     average_power_w: float | None = None
+    moving_duration_seconds: float | None = None
+    average_moving_speed_mps: float | None = None
+    elevation_loss_m: float | None = None
+    average_stride_length_m: float | None = None
+    steps: int | None = None
+    recovery_hr_bpm: int | None = None
+    average_respiration: float | None = None
+    lowest_respiration: float | None = None
+    highest_respiration: float | None = None
+    max_cadence: float | None = None
+    max_power_w: float | None = None
+    normalized_power_w: float | None = None
+    training_stress_score: float | None = None
+    intensity_factor: float | None = None
+    activity_training_load: float | None = None
+    vo2_max: float | None = None
+    moderate_intensity_minutes: int | None = None
+    vigorous_intensity_minutes: int | None = None
+    aerobic_training_effect: float | None = None
+    anaerobic_training_effect: float | None = None
+    training_effect_label: str | None = None
+    hr_zones_seconds: dict[str, float] | None = None
 
 
 class ActivityLap(OwlModel):
@@ -186,6 +249,9 @@ class DailyRecoveryPoint(OwlModel):
     # Garmin's whole-day Body Battery totals from the daily summary. Not overnight recharge.
     body_battery_charged: int | None = None
     body_battery_drained: int | None = None
+    body_battery_change_during_sleep: int | None = None
+    average_sleep_hr_bpm: float | None = None
+    skin_temperature_deviation_c: float | None = None
 
 
 class TrendMetric(OwlModel):
@@ -221,7 +287,67 @@ class TrainingLoad(OwlModel):
     vo2_max: float | None = None
     endurance_score: float | None = None
     hill_score: float | None = None
+    chronic_load: float | None = None
+    acwr_percent: float | None = None
+    acwr_status: str | None = None
+    acwr_feedback: str | None = None
+    optimal_load_min: float | None = None
+    optimal_load_max: float | None = None
+    weekly_load: float | None = None
+    low_aerobic_load: float | None = None
+    low_aerobic_target_min: float | None = None
+    low_aerobic_target_max: float | None = None
+    high_aerobic_load: float | None = None
+    high_aerobic_target_min: float | None = None
+    high_aerobic_target_max: float | None = None
+    anaerobic_load: float | None = None
+    anaerobic_target_min: float | None = None
+    anaerobic_target_max: float | None = None
+    load_focus_feedback: str | None = None
+    heat_acclimation_percent: float | None = None
+    altitude_acclimation_percent: float | None = None
     availability: list[AvailabilityNotice] = Field(default_factory=list)
+
+
+class HeartRateZoneProfile(OwlModel):
+    sport: str | None = None
+    training_method: str | None = None
+    max_heart_rate_bpm: int | None = None
+    resting_heart_rate_bpm: int | None = None
+    lactate_threshold_heart_rate_bpm: int | None = None
+    zone_floors_bpm: dict[str, int] = Field(default_factory=dict)
+
+
+class PowerZoneProfile(OwlModel):
+    sport: str | None = None
+    functional_threshold_power_w: int | None = None
+    zone_floors_w: dict[str, int] = Field(default_factory=dict)
+
+
+class TrainingZones(OwlModel):
+    heart_rate: list[HeartRateZoneProfile] = Field(default_factory=list)
+    power: list[PowerZoneProfile] = Field(default_factory=list)
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
+    note: str = "Garmin-configured zone floors only; no missing ceilings are inferred."
+
+
+class RunningTolerancePoint(OwlModel):
+    date: str
+    acute_distance_m: float | None = None
+    acute_impact_load: float | None = None
+    acute_tolerance: float | None = None
+    feedback: str | None = None
+
+
+class RunningTolerance(OwlModel):
+    start_date: str
+    end_date: str
+    points: list[RunningTolerancePoint] = Field(default_factory=list)
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
+    note: str = (
+        "Garmin-provided running distance, biomechanical impact load, and tolerance only; "
+        "no injury-risk prediction or recommendation."
+    )
 
 
 class TrainingContext(OwlModel):

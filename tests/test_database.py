@@ -11,6 +11,7 @@ from garmin_owl.models import (
     DailySummary,
     HrvSummary,
     SleepSummary,
+    TrainingReadiness,
 )
 from garmin_owl.normalize import normalize_training_load
 
@@ -140,6 +141,37 @@ def test_recovery_rows_preserve_sleep_and_hrv_without_daily_summary(tmp_path: Pa
     assert rows[0]["sleep_score"] == 80
     assert rows[0]["nightly_avg_ms"] == 55
     assert rows[0]["resting_hr_bpm"] is None
+
+
+def test_new_recovery_fields_survive_cache_round_trip(tmp_path: Path) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    database.put_daily(
+        DailySummary(
+            date="2026-01-01",
+            body_battery_at_wake=72,
+            average_waking_respiration=14.2,
+        ),
+        TrainingReadiness(
+            date="2026-01-01",
+            hrv_factor_percent=86,
+            hrv_factor_feedback="BALANCED",
+        ),
+    )
+    database.put_sleep(
+        SleepSummary(
+            date="2026-01-01",
+            average_hr_bpm=49,
+            skin_temperature_deviation_c=0.31,
+            body_battery_change=44,
+        )
+    )
+    daily = database.get_daily("2026-01-01")
+    readiness = database.get_readiness("2026-01-01")
+    sleep = database.get_sleep("2026-01-01")
+    assert daily is not None and daily.body_battery_at_wake == 72
+    assert readiness is not None and readiness.hrv_factor_feedback == "BALANCED"
+    assert sleep is not None and sleep.skin_temperature_deviation_c == 0.31
+    assert sleep.body_battery_change == 44
 
 
 def test_sqlite_file_contains_no_raw_json_payload(tmp_path: Path) -> None:

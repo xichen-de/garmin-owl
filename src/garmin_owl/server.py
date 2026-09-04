@@ -10,7 +10,7 @@ from .tools import GarminTools
 
 mcp = MCPServer(
     "garmin-owl",
-    version="0.1.0",
+    version="0.2.0",
     instructions=(
         "Read-only access to the local user's Garmin Connect data. "
         "Never claim this is medical advice. No mutation tools exist."
@@ -31,13 +31,13 @@ def get_tools() -> GarminTools:
 
 @mcp.tool()
 def get_daily_summary(date: str | None = None) -> dict[str, Any]:
-    """Get concise daily steps, distance, calories, HR, stress, floors, and intensity."""
+    """Get activity time/goals, HR, stress, respiration, SpO2, Body Battery, steps/calories."""
     return get_tools().get_daily_summary(date)
 
 
 @mcp.tool()
 def get_sleep(date: str | None = None) -> dict[str, Any]:
-    """Get Garmin-recorded sleep score, stages, timing, respiration, and SpO2 when available."""
+    """Get sleep score/need, stages, HR/stress, respiration, SpO2, and skin-temp deviation."""
     return get_tools().get_sleep(date)
 
 
@@ -55,7 +55,7 @@ def get_recovery(date: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def get_training_readiness(date: str | None = None) -> dict[str, Any]:
-    """Get Garmin training readiness and its available components."""
+    """Get Garmin training readiness, component percentages, and factor feedback."""
     return get_tools().get_training_readiness(date)
 
 
@@ -103,7 +103,7 @@ def get_training_context(date: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def get_recovery_trend(days: int = 7) -> dict[str, Any]:
-    """Trend sleep, HRV, RHR, readiness, and Body Battery over 7/14/28 days with coverage data."""
+    """Trend sleep HR/temp, HRV, RHR, readiness, and Body Battery over 7/14/28 days."""
     return get_tools().get_recovery_trend(days)
 
 
@@ -115,8 +115,20 @@ def get_training_week(date: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def get_training_load(date: str | None = None) -> dict[str, Any]:
-    """Get Garmin training status/load, VO2 max, endurance, hill; names unavailable sources."""
+    """Get acute/chronic load, ratio/status, focus/targets, VO2 max, scores, acclimation."""
     return get_tools().get_training_load(date)
+
+
+@mcp.tool()
+def get_training_zones() -> dict[str, Any]:
+    """Get configured Garmin HR-zone and cycling power-zone floor thresholds."""
+    return get_tools().get_training_zones()
+
+
+@mcp.tool()
+def get_running_tolerance(days: int = 28, end_date: str | None = None) -> dict[str, Any]:
+    """Get 1-90 days of Garmin running distance, impact load, tolerance, and feedback."""
+    return get_tools().get_running_tolerance(days, end_date)
 
 
 @mcp.tool()

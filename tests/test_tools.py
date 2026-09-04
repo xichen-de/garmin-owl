@@ -40,8 +40,28 @@ class FakeGarmin:
     def get_sleep_data(self, cdate: str) -> dict[str, Any]:
         return self._record("get_sleep_data", {"dailySleepDTO": {"sleepTimeSeconds": 28000}})
 
+    def get_sleep_daily(self, startdate: str, enddate: str) -> list[dict[str, Any]]:
+        return self._record(
+            "get_sleep_daily",
+            [
+                {
+                    "calendarDate": startdate,
+                    "values": {"sleepScore": 80, "skinTempC": 0.2},
+                }
+            ],
+        )
+
     def get_hrv_data(self, cdate: str) -> dict[str, Any]:
         return self._record("get_hrv_data", {"hrvSummary": {"nightlyAverage": 55}})
+
+    def get_hrv_data_range(self, startdate: str, enddate: str) -> dict[str, Any]:
+        return self._record(
+            "get_hrv_data_range",
+            {"hrvSummaries": [{"calendarDate": startdate, "lastNightAvg": 55}]},
+        )
+
+    def get_rhr_daily(self, startdate: str, enddate: str) -> list[dict[str, Any]]:
+        return self._record("get_rhr_daily", [{"calendarDate": startdate, "value": 50}])
 
     def get_training_readiness(self, cdate: str) -> list[dict[str, Any]]:
         return self._record("get_training_readiness", [{"score": 75}])
@@ -84,6 +104,20 @@ class FakeGarmin:
     def get_weigh_ins(self, startdate: str, enddate: str) -> dict[str, Any]:
         return self._record(
             "get_weigh_ins", {"dateWeightList": [{"calendarDate": startdate, "weight": 70000}]}
+        )
+
+    def get_heart_rate_zones(self) -> list[dict[str, Any]]:
+        return self._record("get_heart_rate_zones", [{"sport": "DEFAULT", "zone1Floor": 90}])
+
+    def get_power_zones(self) -> list[dict[str, Any]]:
+        return self._record("get_power_zones", [{"sport": "CYCLING", "zone1Floor": 100}])
+
+    def get_running_tolerance(
+        self, startdate: str, enddate: str, aggregation: str
+    ) -> list[dict[str, Any]]:
+        return self._record(
+            "get_running_tolerance",
+            [{"calendarDate": startdate, "acuteTolerance": 25}],
         )
 
 
@@ -130,6 +164,8 @@ def test_tools_call_only_explicit_reads(tools: GarminTools, fake: FakeGarmin) ->
     tools.get_activities(limit=2)
     tools.get_activity(123)
     tools.get_body_composition(DATE, DATE)
+    tools.get_training_zones()
+    tools.get_running_tolerance(7, DATE)
     assert set(fake.calls) == {
         "get_user_summary",
         "get_sleep_data",
@@ -142,6 +178,9 @@ def test_tools_call_only_explicit_reads(tools: GarminTools, fake: FakeGarmin) ->
         "get_activity_hr_in_timezones",
         "get_activity_power_in_timezones",
         "get_weigh_ins",
+        "get_heart_rate_zones",
+        "get_power_zones",
+        "get_running_tolerance",
     }
     assert not any(
         word in name for name in fake.calls for word in ("set", "add", "delete", "upload", "create")
@@ -212,9 +251,7 @@ def test_activity_limit_validation(tools: GarminTools) -> None:
 def test_activity_detail_is_served_from_cache_without_new_calls(
     fake: FakeGarmin, tmp_path: Path
 ) -> None:
-    tools = GarminTools(
-        _client(fake), GarminDatabase(tmp_path / "garmin.sqlite")
-    )
+    tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
     first = tools.get_activity(123)
     first_calls = list(fake.calls)
     second = tools.get_activity(123)
@@ -225,6 +262,8 @@ def test_activity_detail_is_served_from_cache_without_new_calls(
 def test_v2_bound_validation(tools: GarminTools) -> None:
     with pytest.raises(ValueError, match="1 and 90"):
         tools.get_recent_activities(days=91)
+    with pytest.raises(ValueError, match="1 and 90"):
+        tools.get_running_tolerance(days=91)
     with pytest.raises(ValueError, match="one of 7, 14, or 28"):
         tools.get_recovery_trend(8)
     with pytest.raises(ValueError, match="between 2 and 10"):
@@ -256,7 +295,7 @@ def test_recovery_trend_compares_requested_date_with_preceding_days(tmp_path: Pa
     assert resting_hr["sample_days"] == 6
     assert resting_hr["baseline_start"] == "2026-01-01"
     assert resting_hr["baseline_end"] == "2026-01-06"
-    assert fake.calls == []
+    assert fake.calls == ["get_sleep_daily", "get_body_battery"]
 
 
 def test_training_week_discloses_partial_detail_coverage(tmp_path: Path) -> None:
@@ -310,17 +349,13 @@ def test_historical_training_context_uses_activities_ending_on_requested_date(
         database.mark_synced("readiness", cdate)
     database.put_training_load(TrainingLoad(date="2026-01-07", acute_load=100))
     database.mark_synced("training_load", "2026-01-07")
-    database.put_activity_summary(
-        ActivitySummary(activity_id=1, start_time="2026-01-05 08:00:00")
-    )
-    database.put_activity_summary(
-        ActivitySummary(activity_id=2, start_time="2026-08-30 08:00:00")
-    )
+    database.put_activity_summary(ActivitySummary(activity_id=1, start_time="2026-01-05 08:00:00"))
+    database.put_activity_summary(ActivitySummary(activity_id=2, start_time="2026-08-30 08:00:00"))
     database.mark_synced("activities", "2026-01-01:2026-01-07")
 
     result = tools.get_training_context("2026-01-07")
     assert [item["activity_id"] for item in result["recent_activities"]] == [1]
-    assert fake.calls == []
+    assert fake.calls == ["get_sleep_daily", "get_body_battery"]
 
 
 class CycleGarmin(FakeGarmin):
@@ -330,26 +365,26 @@ class CycleGarmin(FakeGarmin):
             {"daySummary": {"currentPhase": 1, "dayInCycle": 2}},
         )
 
-    def get_menstrual_calendar_data(
-        self, startdate: str, enddate: str
-    ) -> dict[str, Any]:
+    def get_menstrual_calendar_data(self, startdate: str, enddate: str) -> dict[str, Any]:
         return self._record("get_menstrual_calendar_data", {"cycleSummaries": []})
 
 
 def test_cycle_is_on_demand_normalized_and_cached(tmp_path: Path) -> None:
     fake = CycleGarmin()
-    tools = GarminTools(
-        _client(fake), GarminDatabase(tmp_path / "garmin.sqlite")
-    )
+    tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
     first = tools.get_cycle("2026-01-01")
     first_calls = list(fake.calls)
     second = tools.get_cycle("2026-01-01")
     assert first == second
     assert first["phase"] == "menstruation"
-    assert fake.calls == first_calls == [
-        "get_menstrual_data_for_date",
-        "get_menstrual_calendar_data",
-    ]
+    assert (
+        fake.calls
+        == first_calls
+        == [
+            "get_menstrual_data_for_date",
+            "get_menstrual_calendar_data",
+        ]
+    )
 
 
 def test_body_battery_and_stress_keep_their_full_shape_when_cached(tmp_path: Path) -> None:
@@ -376,9 +411,7 @@ class PartlyMissingGarmin(FakeGarmin):
 
 
 def test_recovery_distinguishes_missing_data_from_a_failed_read(tmp_path: Path) -> None:
-    tools = GarminTools(
-        _client(PartlyMissingGarmin()), GarminDatabase(tmp_path / "garmin.sqlite")
-    )
+    tools = GarminTools(_client(PartlyMissingGarmin()), GarminDatabase(tmp_path / "garmin.sqlite"))
     result = tools.get_recovery(DATE)
     notices = {item["field"]: item["status"] for item in result["availability"]}
     assert notices["hrv"] == "missing_or_unsupported"
@@ -540,13 +573,17 @@ def test_trend_reports_weekly_hrv_as_a_series_without_a_rolling_mean_deviation(
     tools = GarminTools(_client(FakeGarmin()), database)
     _seed_recovery_days(database)
     for day in range(1, 8):
-        database.put_hrv(
-            HrvSummary(date=f"2026-01-{day:02d}", weekly_average_ms=60 + day)
-        )
+        database.put_hrv(HrvSummary(date=f"2026-01-{day:02d}", weekly_average_ms=60 + day))
 
     result = tools._recovery_trend(7, date(2026, 1, 7)).compact()
     assert [point["hrv_weekly_average_ms"] for point in result["points"]] == [
-        61, 62, 63, 64, 65, 66, 67
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
     ]
     # Deliberately no deviation metric: consecutive weekly averages share nights.
     assert "hrv_weekly_average_ms" not in {item["metric"] for item in result["metrics"]}
@@ -573,5 +610,6 @@ def test_trend_carries_body_battery_totals_without_extra_garmin_calls(
     assert metrics["body_battery_drained"]["sample_days"] == 6
     notices = {item["field"]: item for item in result["availability"]}
     assert notices["body_battery_charged"]["status"] == "whole_day_total"
-    # The daily summary already carries these, so the trend costs no extra Garmin reads.
-    assert fake.calls == []
+    # Existing daily values are reused; one compact sleep-range read adds the newly supported
+    # overnight change, sleep HR, and skin-temperature deviation without per-day reads.
+    assert fake.calls == ["get_sleep_daily"]

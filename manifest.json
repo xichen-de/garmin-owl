@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "garmin-owl",
   "display_name": "Garmin Owl",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-only, read-only access to your Garmin Connect health and activity data.",
   "long_description": "Garmin Owl runs entirely as a local stdio MCP server. It reads your existing Garmin Connect data on demand through the unofficial python-garminconnect client. It has no write tools, public listener, telemetry, analytics, remote database, or bundled credentials. Garmin session tokens remain in the standard local ~/.garminconnect store.",
   "author": {
@@ -78,6 +78,14 @@
     {
       "name": "get_training_load",
       "description": "Read Garmin training load/status aggregates, naming any source Garmin had no data for."
+    },
+    {
+      "name": "get_training_zones",
+      "description": "Read configured Garmin heart-rate and cycling power-zone thresholds."
+    },
+    {
+      "name": "get_running_tolerance",
+      "description": "Read Garmin running distance, biomechanical impact load, tolerance, and feedback for a bounded date range."
     },
     {
       "name": "get_recent_activities",

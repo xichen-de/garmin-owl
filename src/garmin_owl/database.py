@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from .models import (
+    SKIN_TEMPERATURE_BASIS,
     ActivityDetail,
     ActivityLap,
     ActivitySummary,
@@ -39,7 +40,7 @@ from .notices import (
     unlabeled_status_notice,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 TODAY_TTL = timedelta(minutes=20)
 # A calendar day keeps changing after midnight: watches and scales upload late, and Garmin
 # recomputes some daily aggregates. Treat a day as settled only at noon the following day, and
@@ -55,13 +56,31 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
   body_battery_drained INTEGER, floors_ascended REAL, floors_descended REAL,
   moderate_intensity_minutes INTEGER, vigorous_intensity_minutes INTEGER,
   training_readiness INTEGER, readiness_level TEXT, readiness_feedback TEXT,
-  readiness_timestamp TEXT, recovery_time_minutes INTEGER, fetched_at TEXT NOT NULL
+  readiness_timestamp TEXT, recovery_time_minutes INTEGER,
+  active_seconds INTEGER, highly_active_seconds INTEGER, sedentary_seconds INTEGER,
+  daily_step_goal INTEGER, intensity_minutes_goal INTEGER,
+  last_seven_days_avg_resting_hr_bpm INTEGER, body_battery_during_sleep INTEGER,
+  body_battery_at_wake INTEGER, average_waking_respiration REAL,
+  highest_respiration REAL, lowest_respiration REAL, average_spo2_percent REAL,
+  lowest_spo2_percent REAL, readiness_sleep_score INTEGER,
+  readiness_hrv_factor_percent REAL, readiness_acute_load_factor_percent REAL,
+  readiness_sleep_history_factor_percent REAL, readiness_stress_history_factor_percent REAL,
+  readiness_hrv_factor_feedback TEXT, readiness_acute_load_factor_feedback TEXT,
+  readiness_sleep_history_factor_feedback TEXT, readiness_sleep_score_factor_feedback TEXT,
+  readiness_stress_history_factor_feedback TEXT, readiness_recovery_time_factor_feedback TEXT,
+  readiness_recovery_time_change_phrase TEXT, fetched_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sleep (
   date TEXT PRIMARY KEY, sleep_score INTEGER, total_sleep_seconds INTEGER,
   deep_sleep_seconds INTEGER, light_sleep_seconds INTEGER, rem_sleep_seconds INTEGER,
   awake_seconds INTEGER, sleep_start TEXT, sleep_end TEXT, respiration_avg REAL,
   respiration_min REAL, respiration_max REAL, spo2_avg REAL, spo2_min REAL,
+  average_hr_bpm REAL, average_stress REAL, nap_seconds INTEGER, awake_count INTEGER,
+  restless_moments_count INTEGER, sleep_need_minutes INTEGER,
+  sleep_need_baseline_minutes INTEGER, sleep_need_feedback TEXT,
+  sleep_alignment_status TEXT, skin_temperature_deviation_c REAL,
+  skin_temperature_calibration_days INTEGER, body_battery_change INTEGER,
+  sleep_score_feedback TEXT,
   fetched_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS hrv (
@@ -72,6 +91,13 @@ CREATE TABLE IF NOT EXISTS hrv (
 CREATE TABLE IF NOT EXISTS training_status (
   date TEXT PRIMARY KEY, training_status TEXT, acute_load REAL, load_ratio REAL,
   vo2_max REAL, endurance_score REAL, hill_score REAL, training_status_code INTEGER,
+  chronic_load REAL, acwr_percent REAL, acwr_status TEXT, acwr_feedback TEXT,
+  optimal_load_min REAL, optimal_load_max REAL, weekly_load REAL,
+  low_aerobic_load REAL, low_aerobic_target_min REAL, low_aerobic_target_max REAL,
+  high_aerobic_load REAL, high_aerobic_target_min REAL, high_aerobic_target_max REAL,
+  anaerobic_load REAL, anaerobic_target_min REAL, anaerobic_target_max REAL,
+  load_focus_feedback TEXT, heat_acclimation_percent REAL,
+  altitude_acclimation_percent REAL,
   unavailable_sources TEXT, fetched_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS body_battery (
@@ -90,7 +116,13 @@ CREATE TABLE IF NOT EXISTS activities (
   average_hr_bpm REAL, max_hr_bpm REAL, average_speed_mps REAL, elevation_gain_m REAL,
   average_cadence REAL, average_power_w REAL, aerobic_training_effect REAL,
   anaerobic_training_effect REAL, training_effect_label TEXT, fetched_at TEXT NOT NULL,
-  detail_fetched_at TEXT, hr_zones_status TEXT, power_zones_status TEXT
+  detail_fetched_at TEXT, hr_zones_status TEXT, power_zones_status TEXT,
+  moving_duration_seconds REAL, average_moving_speed_mps REAL, elevation_loss_m REAL,
+  average_stride_length_m REAL, steps INTEGER, recovery_hr_bpm INTEGER,
+  average_respiration REAL, lowest_respiration REAL, highest_respiration REAL,
+  max_cadence REAL, max_power_w REAL, normalized_power_w REAL,
+  training_stress_score REAL, intensity_factor REAL, activity_training_load REAL,
+  vo2_max REAL, moderate_intensity_minutes INTEGER, vigorous_intensity_minutes INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_activities_date ON activities(date);
 CREATE TABLE IF NOT EXISTS activity_laps (
@@ -132,6 +164,101 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("training_status", "unavailable_sources", "TEXT"),
     ("training_status", "training_status_code", "INTEGER"),
     ("cycle_metrics", "data_status", "TEXT"),
+    *(
+        ("daily_metrics", name, kind)
+        for name, kind in (
+            ("active_seconds", "INTEGER"),
+            ("highly_active_seconds", "INTEGER"),
+            ("sedentary_seconds", "INTEGER"),
+            ("daily_step_goal", "INTEGER"),
+            ("intensity_minutes_goal", "INTEGER"),
+            ("last_seven_days_avg_resting_hr_bpm", "INTEGER"),
+            ("body_battery_during_sleep", "INTEGER"),
+            ("body_battery_at_wake", "INTEGER"),
+            ("average_waking_respiration", "REAL"),
+            ("highest_respiration", "REAL"),
+            ("lowest_respiration", "REAL"),
+            ("average_spo2_percent", "REAL"),
+            ("lowest_spo2_percent", "REAL"),
+            ("readiness_sleep_score", "INTEGER"),
+            ("readiness_hrv_factor_percent", "REAL"),
+            ("readiness_acute_load_factor_percent", "REAL"),
+            ("readiness_sleep_history_factor_percent", "REAL"),
+            ("readiness_stress_history_factor_percent", "REAL"),
+            ("readiness_hrv_factor_feedback", "TEXT"),
+            ("readiness_acute_load_factor_feedback", "TEXT"),
+            ("readiness_sleep_history_factor_feedback", "TEXT"),
+            ("readiness_sleep_score_factor_feedback", "TEXT"),
+            ("readiness_stress_history_factor_feedback", "TEXT"),
+            ("readiness_recovery_time_factor_feedback", "TEXT"),
+            ("readiness_recovery_time_change_phrase", "TEXT"),
+        )
+    ),
+    *(
+        ("sleep", name, kind)
+        for name, kind in (
+            ("average_hr_bpm", "REAL"),
+            ("average_stress", "REAL"),
+            ("nap_seconds", "INTEGER"),
+            ("awake_count", "INTEGER"),
+            ("restless_moments_count", "INTEGER"),
+            ("sleep_need_minutes", "INTEGER"),
+            ("sleep_need_baseline_minutes", "INTEGER"),
+            ("sleep_need_feedback", "TEXT"),
+            ("sleep_alignment_status", "TEXT"),
+            ("skin_temperature_deviation_c", "REAL"),
+            ("skin_temperature_calibration_days", "INTEGER"),
+            ("body_battery_change", "INTEGER"),
+            ("sleep_score_feedback", "TEXT"),
+        )
+    ),
+    *(
+        ("training_status", name, kind)
+        for name, kind in (
+            ("chronic_load", "REAL"),
+            ("acwr_percent", "REAL"),
+            ("acwr_status", "TEXT"),
+            ("acwr_feedback", "TEXT"),
+            ("optimal_load_min", "REAL"),
+            ("optimal_load_max", "REAL"),
+            ("weekly_load", "REAL"),
+            ("low_aerobic_load", "REAL"),
+            ("low_aerobic_target_min", "REAL"),
+            ("low_aerobic_target_max", "REAL"),
+            ("high_aerobic_load", "REAL"),
+            ("high_aerobic_target_min", "REAL"),
+            ("high_aerobic_target_max", "REAL"),
+            ("anaerobic_load", "REAL"),
+            ("anaerobic_target_min", "REAL"),
+            ("anaerobic_target_max", "REAL"),
+            ("load_focus_feedback", "TEXT"),
+            ("heat_acclimation_percent", "REAL"),
+            ("altitude_acclimation_percent", "REAL"),
+        )
+    ),
+    *(
+        ("activities", name, kind)
+        for name, kind in (
+            ("moving_duration_seconds", "REAL"),
+            ("average_moving_speed_mps", "REAL"),
+            ("elevation_loss_m", "REAL"),
+            ("average_stride_length_m", "REAL"),
+            ("steps", "INTEGER"),
+            ("recovery_hr_bpm", "INTEGER"),
+            ("average_respiration", "REAL"),
+            ("lowest_respiration", "REAL"),
+            ("highest_respiration", "REAL"),
+            ("max_cadence", "REAL"),
+            ("max_power_w", "REAL"),
+            ("normalized_power_w", "REAL"),
+            ("training_stress_score", "REAL"),
+            ("intensity_factor", "REAL"),
+            ("activity_training_load", "REAL"),
+            ("vo2_max", "REAL"),
+            ("moderate_intensity_minutes", "INTEGER"),
+            ("vigorous_intensity_minutes", "INTEGER"),
+        )
+    ),
 )
 
 
@@ -185,9 +312,21 @@ class GarminDatabase:
                     for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
                 }
                 if column not in existing:
-                    connection.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
-                    )
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+            if version < 5:
+                # Version 5 exposes additional scalars from reads that older rows already
+                # claimed were complete. Preserve the normalized cache, but make those rows
+                # stale once so the next relevant read can populate the new fields.
+                old_stamp = "1970-01-01T00:00:00+00:00"
+                connection.execute("UPDATE daily_metrics SET fetched_at=?", (old_stamp,))
+                connection.execute("UPDATE sleep SET fetched_at=?", (old_stamp,))
+                connection.execute(
+                    "UPDATE activities SET fetched_at=?, detail_fetched_at=NULL", (old_stamp,)
+                )
+                connection.execute(
+                    "DELETE FROM sync_state WHERE resource IN "
+                    "('activities','training_load','readiness')"
+                )
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         try:
             self.path.chmod(0o600)
@@ -323,11 +462,58 @@ class GarminDatabase:
                 "floors_descended": item.floors_descended,
                 "moderate_intensity_minutes": item.moderate_intensity_minutes,
                 "vigorous_intensity_minutes": item.vigorous_intensity_minutes,
+                "active_seconds": item.active_seconds,
+                "highly_active_seconds": item.highly_active_seconds,
+                "sedentary_seconds": item.sedentary_seconds,
+                "daily_step_goal": item.daily_step_goal,
+                "intensity_minutes_goal": item.intensity_minutes_goal,
+                "last_seven_days_avg_resting_hr_bpm": (item.last_seven_days_avg_resting_hr_bpm),
+                "body_battery_during_sleep": item.body_battery_during_sleep,
+                "body_battery_at_wake": item.body_battery_at_wake,
+                "average_waking_respiration": item.average_waking_respiration,
+                "highest_respiration": item.highest_respiration,
+                "lowest_respiration": item.lowest_respiration,
+                "average_spo2_percent": item.average_spo2_percent,
+                "lowest_spo2_percent": item.lowest_spo2_percent,
                 "training_readiness": readiness.score if readiness else None,
                 "readiness_level": readiness.level if readiness else None,
                 "readiness_feedback": readiness.feedback if readiness else None,
                 "readiness_timestamp": readiness.timestamp if readiness else None,
                 "recovery_time_minutes": readiness.recovery_time_minutes if readiness else None,
+                "readiness_sleep_score": readiness.sleep_score if readiness else None,
+                "readiness_hrv_factor_percent": (
+                    readiness.hrv_factor_percent if readiness else None
+                ),
+                "readiness_acute_load_factor_percent": (
+                    readiness.acute_load_factor_percent if readiness else None
+                ),
+                "readiness_sleep_history_factor_percent": (
+                    readiness.sleep_history_factor_percent if readiness else None
+                ),
+                "readiness_stress_history_factor_percent": (
+                    readiness.stress_history_factor_percent if readiness else None
+                ),
+                "readiness_hrv_factor_feedback": (
+                    readiness.hrv_factor_feedback if readiness else None
+                ),
+                "readiness_acute_load_factor_feedback": (
+                    readiness.acute_load_factor_feedback if readiness else None
+                ),
+                "readiness_sleep_history_factor_feedback": (
+                    readiness.sleep_history_factor_feedback if readiness else None
+                ),
+                "readiness_sleep_score_factor_feedback": (
+                    readiness.sleep_score_factor_feedback if readiness else None
+                ),
+                "readiness_stress_history_factor_feedback": (
+                    readiness.stress_history_factor_feedback if readiness else None
+                ),
+                "readiness_recovery_time_factor_feedback": (
+                    readiness.recovery_time_factor_feedback if readiness else None
+                ),
+                "readiness_recovery_time_change_phrase": (
+                    readiness.recovery_time_change_phrase if readiness else None
+                ),
                 "fetched_at": _timestamp(now),
             },
         )
@@ -347,6 +533,18 @@ class GarminDatabase:
             feedback=row["readiness_feedback"],
             timestamp=row["readiness_timestamp"],
             recovery_time_minutes=row["recovery_time_minutes"],
+            sleep_score=row["readiness_sleep_score"],
+            hrv_factor_percent=row["readiness_hrv_factor_percent"],
+            acute_load_factor_percent=row["readiness_acute_load_factor_percent"],
+            sleep_history_factor_percent=row["readiness_sleep_history_factor_percent"],
+            stress_history_factor_percent=row["readiness_stress_history_factor_percent"],
+            hrv_factor_feedback=row["readiness_hrv_factor_feedback"],
+            acute_load_factor_feedback=row["readiness_acute_load_factor_feedback"],
+            sleep_history_factor_feedback=row["readiness_sleep_history_factor_feedback"],
+            sleep_score_factor_feedback=row["readiness_sleep_score_factor_feedback"],
+            stress_history_factor_feedback=row["readiness_stress_history_factor_feedback"],
+            recovery_time_factor_feedback=row["readiness_recovery_time_factor_feedback"],
+            recovery_time_change_phrase=row["readiness_recovery_time_change_phrase"],
         )
 
     def put_sleep(self, item: SleepSummary, *, now: datetime | None = None) -> bool:
@@ -368,6 +566,19 @@ class GarminDatabase:
                 "respiration_max": item.highest_respiration,
                 "spo2_avg": item.average_spo2_percent,
                 "spo2_min": item.lowest_spo2_percent,
+                "average_hr_bpm": item.average_hr_bpm,
+                "average_stress": item.average_stress,
+                "nap_seconds": item.nap_seconds,
+                "awake_count": item.awake_count,
+                "restless_moments_count": item.restless_moments_count,
+                "sleep_need_minutes": item.sleep_need_minutes,
+                "sleep_need_baseline_minutes": item.sleep_need_baseline_minutes,
+                "sleep_need_feedback": item.sleep_need_feedback,
+                "sleep_alignment_status": item.sleep_alignment_status,
+                "skin_temperature_deviation_c": item.skin_temperature_deviation_c,
+                "skin_temperature_calibration_days": item.skin_temperature_calibration_days,
+                "body_battery_change": item.body_battery_change,
+                "sleep_score_feedback": item.sleep_score_feedback,
                 "fetched_at": _timestamp(now),
             },
         )
@@ -386,6 +597,8 @@ class GarminDatabase:
         }
         for old, new in aliases.items():
             data[new] = data.pop(old)
+        if data.get("skin_temperature_deviation_c") is not None:
+            data["skin_temperature_basis"] = SKIN_TEMPERATURE_BASIS
         return SleepSummary(**data)
 
     def put_hrv(self, item: HrvSummary, *, now: datetime | None = None) -> bool:
@@ -447,9 +660,7 @@ class GarminDatabase:
         item = TrainingLoad(
             **data,
             availability=[
-                unavailable_source_notice(source)
-                for source in unavailable.split(",")
-                if source
+                unavailable_source_notice(source) for source in unavailable.split(",") if source
             ],
         )
         # Rebuilt rather than stored: it is fully determined by the two status columns, and a
@@ -458,9 +669,7 @@ class GarminDatabase:
             item.availability.insert(0, unlabeled_status_notice(item.training_status_code))
         return item
 
-    def put_body_battery(
-        self, item: BodyBatterySummary, *, now: datetime | None = None
-    ) -> bool:
+    def put_body_battery(self, item: BodyBatterySummary, *, now: datetime | None = None) -> bool:
         return self._upsert(
             "body_battery",
             "date",
@@ -472,9 +681,7 @@ class GarminDatabase:
                 "end_level": item.end_level,
                 "highest_level": item.highest_level,
                 "lowest_level": item.lowest_level,
-                "data_status": next(
-                    (notice.status for notice in item.availability), None
-                ),
+                "data_status": next((notice.status for notice in item.availability), None),
                 "fetched_at": _timestamp(now),
             },
         )
@@ -487,9 +694,7 @@ class GarminDatabase:
         status = data.pop("data_status")
         return BodyBatterySummary(
             **data,
-            availability=(
-                [body_battery_notice(str(status), cdate)] if status else []
-            ),
+            availability=([body_battery_notice(str(status), cdate)] if status else []),
         )
 
     def put_stress(self, item: StressSummary, *, now: datetime | None = None) -> bool:
@@ -506,10 +711,22 @@ class GarminDatabase:
         row = self._row("stress", "date", cdate)
         return StressSummary(**dict(row)) if row else None
 
-    def put_activity_summary(
-        self, item: ActivitySummary, *, now: datetime | None = None
-    ) -> bool:
-        values = item.model_dump()
+    def put_activity_summary(self, item: ActivitySummary, *, now: datetime | None = None) -> bool:
+        values = item.model_dump(
+            exclude={
+                "hr_zones_seconds",
+                "aerobic_training_effect",
+                "anaerobic_training_effect",
+                "training_effect_label",
+            }
+        )
+        values.update(
+            {
+                "aerobic_training_effect": item.aerobic_training_effect,
+                "anaerobic_training_effect": item.anaerobic_training_effect,
+                "training_effect_label": item.training_effect_label,
+            }
+        )
         values.update({"date": _activity_date(item), "fetched_at": _timestamp(now)})
         columns = list(values)
         with self.connect() as connection:
@@ -527,11 +744,24 @@ class GarminDatabase:
                 f"ON CONFLICT(activity_id) DO UPDATE SET {updates}",
                 tuple(values[column] for column in columns),
             )
+            if item.hr_zones_seconds:
+                connection.execute(
+                    "DELETE FROM activity_hr_zones WHERE activity_id=?", (item.activity_id,)
+                )
+                connection.executemany(
+                    "INSERT INTO activity_hr_zones(activity_id,zone,seconds) VALUES(?,?,?)",
+                    [
+                        (item.activity_id, zone, seconds)
+                        for zone, seconds in item.hr_zones_seconds.items()
+                    ],
+                )
+                connection.execute(
+                    "UPDATE activities SET hr_zones_status='available' WHERE activity_id=?",
+                    (item.activity_id,),
+                )
         return existed is None
 
-    def put_activity_detail(
-        self, item: ActivityDetail, *, now: datetime | None = None
-    ) -> bool:
+    def put_activity_detail(self, item: ActivityDetail, *, now: datetime | None = None) -> bool:
         inserted = self.put_activity_summary(item.summary, now=now)
         stamp = _timestamp(now)
         with self.connect() as connection:
@@ -623,8 +853,15 @@ class GarminDatabase:
             power = connection.execute(
                 "SELECT zone,seconds FROM activity_power_zones WHERE activity_id=?", (activity_id,)
             ).fetchall()
-        summary = ActivitySummary(**dict(row))
         zones = {str(item["zone"]): float(item["seconds"]) for item in hr}
+        summary = ActivitySummary(**dict(row), hr_zones_seconds=zones or None).model_copy(
+            update={
+                "aerobic_training_effect": None,
+                "anaerobic_training_effect": None,
+                "training_effect_label": None,
+                "hr_zones_seconds": None,
+            }
+        )
         total = sum(zones.values()) or None
         coverage = (
             round(total / summary.duration_seconds * 100, 1)
@@ -686,7 +923,23 @@ class GarminDatabase:
         parameters.append(limit)
         with self.connect() as connection:
             rows = connection.execute(sql, parameters).fetchall()
-        return [ActivitySummary(**dict(row)) for row in rows]
+            ids = [int(row["activity_id"]) for row in rows]
+            zone_rows = (
+                connection.execute(
+                    f"SELECT activity_id,zone,seconds FROM activity_hr_zones "
+                    f"WHERE activity_id IN ({', '.join('?' for _ in ids)})",
+                    ids,
+                ).fetchall()
+                if ids
+                else []
+            )
+        zones: dict[int, dict[str, float]] = {}
+        for row in zone_rows:
+            zones.setdefault(int(row["activity_id"]), {})[str(row["zone"])] = float(row["seconds"])
+        return [
+            ActivitySummary(**dict(row), hr_zones_seconds=zones.get(int(row["activity_id"])))
+            for row in rows
+        ]
 
     def weekly_activity_aggregates(
         self, start_date: str, end_date: str
@@ -733,7 +986,9 @@ class GarminDatabase:
                 "UNION SELECT date FROM hrv) "
                 "SELECT dates.date,d.resting_hr_bpm,d.training_readiness,d.recovery_time_minutes,"
                 "d.body_battery_charged,d.body_battery_drained,"
-                "s.sleep_score,h.nightly_avg_ms,h.last_night_avg_ms,h.weekly_avg_ms FROM dates "
+                "s.sleep_score,s.average_hr_bpm,s.skin_temperature_deviation_c,"
+                "s.body_battery_change,h.nightly_avg_ms,h.last_night_avg_ms,h.weekly_avg_ms "
+                "FROM dates "
                 "LEFT JOIN daily_metrics d ON d.date=dates.date "
                 "LEFT JOIN sleep s ON s.date=dates.date LEFT JOIN hrv h ON h.date=dates.date "
                 "WHERE dates.date BETWEEN ? AND ? ORDER BY dates.date",
@@ -756,9 +1011,7 @@ class GarminDatabase:
             updated += int(not created)
         return inserted, updated
 
-    def get_body_composition(
-        self, start_date: str, end_date: str
-    ) -> list[BodyCompositionEntry]:
+    def get_body_composition(self, start_date: str, end_date: str) -> list[BodyCompositionEntry]:
         with self.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM body_composition WHERE substr(timestamp,1,10) BETWEEN ? AND ? "
@@ -777,11 +1030,7 @@ class GarminDatabase:
             {
                 **item.model_dump(exclude={"availability"}),
                 "data_status": next(
-                    (
-                        notice.status
-                        for notice in item.availability
-                        if notice.field == "cycle"
-                    ),
+                    (notice.status for notice in item.availability if notice.field == "cycle"),
                     "available",
                 ),
                 "fetched_at": _timestamp(now),
@@ -800,25 +1049,30 @@ class GarminDatabase:
         with self.connect() as connection:
             return cast(
                 sqlite3.Row | None,
-                connection.execute(
-                f"SELECT * FROM {table} WHERE {key} = ?", (value,)
-                ).fetchone(),
+                connection.execute(f"SELECT * FROM {table} WHERE {key} = ?", (value,)).fetchone(),
             )
 
     def info(self) -> CacheInfo:
         tables = (
-            "daily_metrics", "sleep", "hrv", "training_status", "activities",
-            "activity_laps", "activity_hr_zones", "activity_power_zones", "body_composition",
-            "cycle_metrics", "body_battery", "stress",
+            "daily_metrics",
+            "sleep",
+            "hrv",
+            "training_status",
+            "activities",
+            "activity_laps",
+            "activity_hr_zones",
+            "activity_power_zones",
+            "body_composition",
+            "cycle_metrics",
+            "body_battery",
+            "stress",
         )
         with self.connect() as connection:
             counts = {
                 table: int(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
                 for table in tables
             }
-            dates = connection.execute(
-                "SELECT min(date),max(date) FROM daily_metrics"
-            ).fetchone()
+            dates = connection.execute("SELECT min(date),max(date) FROM daily_metrics").fetchone()
         return CacheInfo(
             path=str(self.path),
             schema_version=SCHEMA_VERSION,
@@ -830,9 +1084,19 @@ class GarminDatabase:
 
     def clear(self, *, vacuum: bool = False) -> None:
         tables = (
-            "activity_laps", "activity_hr_zones", "activity_power_zones", "activities",
-            "daily_metrics", "sleep", "hrv", "training_status", "body_composition", "sync_state",
-            "cycle_metrics", "body_battery", "stress",
+            "activity_laps",
+            "activity_hr_zones",
+            "activity_power_zones",
+            "activities",
+            "daily_metrics",
+            "sleep",
+            "hrv",
+            "training_status",
+            "body_composition",
+            "sync_state",
+            "cycle_metrics",
+            "body_battery",
+            "stress",
         )
         with self.connect() as connection:
             for table in tables:

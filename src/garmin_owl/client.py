@@ -22,6 +22,9 @@ class GarminReadAPI(Protocol):
     def get_user_summary(self, cdate: str) -> dict[str, Any]: ...
     def get_sleep_data(self, cdate: str) -> dict[str, Any]: ...
     def get_hrv_data(self, cdate: str) -> dict[str, Any] | None: ...
+    def get_sleep_daily(self, startdate: str, enddate: str) -> Any: ...
+    def get_hrv_data_range(self, startdate: str, enddate: str) -> Any: ...
+    def get_rhr_daily(self, startdate: str, enddate: str) -> Any: ...
     def get_training_readiness(self, cdate: str) -> Any: ...
     def get_body_battery(self, startdate: str, enddate: str | None = None) -> Any: ...
     def get_stress_data(self, cdate: str) -> dict[str, Any]: ...
@@ -35,10 +38,11 @@ class GarminReadAPI(Protocol):
     def get_max_metrics(self, cdate: str) -> dict[str, Any]: ...
     def get_endurance_score(self, startdate: str, enddate: str | None = None) -> dict[str, Any]: ...
     def get_hill_score(self, startdate: str, enddate: str | None = None) -> dict[str, Any]: ...
+    def get_heart_rate_zones(self) -> Any: ...
+    def get_power_zones(self) -> Any: ...
+    def get_running_tolerance(self, startdate: str, enddate: str, aggregation: str) -> Any: ...
     def get_menstrual_data_for_date(self, fordate: str) -> dict[str, Any]: ...
-    def get_menstrual_calendar_data(
-        self, startdate: str, enddate: str
-    ) -> dict[str, Any]: ...
+    def get_menstrual_calendar_data(self, startdate: str, enddate: str) -> dict[str, Any]: ...
 
 
 class GarminOwlError(RuntimeError):
@@ -113,11 +117,26 @@ class GarminDataClient:
     def hrv(self, cdate: str) -> Any:
         return self._read("HRV", lambda: self.__api.get_hrv_data(cdate))
 
+    def sleep_range(self, startdate: str, enddate: str) -> Any:
+        return self._read("sleep range", lambda: self.__api.get_sleep_daily(startdate, enddate))
+
+    def hrv_range(self, startdate: str, enddate: str) -> Any:
+        return self._read("HRV range", lambda: self.__api.get_hrv_data_range(startdate, enddate))
+
+    def resting_hr_range(self, startdate: str, enddate: str) -> Any:
+        return self._read("resting HR range", lambda: self.__api.get_rhr_daily(startdate, enddate))
+
     def training_readiness(self, cdate: str) -> Any:
         return self._read("training readiness", lambda: self.__api.get_training_readiness(cdate))
 
     def body_battery(self, cdate: str) -> Any:
         return self._read("body battery", lambda: self.__api.get_body_battery(cdate, cdate))
+
+    def body_battery_range(self, startdate: str, enddate: str) -> Any:
+        return self._read(
+            "body battery range",
+            lambda: self.__api.get_body_battery(startdate, enddate),
+        )
 
     def stress(self, cdate: str) -> Any:
         return self._read("stress", lambda: self.__api.get_stress_data(cdate))
@@ -148,16 +167,14 @@ class GarminDataClient:
         try:
             power_zones = self._read(
                 "activity power zones",
-                lambda: self.__api.get_activity_power_in_timezones(activity_key)
+                lambda: self.__api.get_activity_power_in_timezones(activity_key),
             )
         except GarminOwlError:
             power_zones = None
         return summary, hr_zones, power_zones
 
     def body_composition(self, startdate: str, enddate: str) -> Any:
-        return self._read(
-            "body composition", lambda: self.__api.get_weigh_ins(startdate, enddate)
-        )
+        return self._read("body composition", lambda: self.__api.get_weigh_ins(startdate, enddate))
 
     def training_status(self, cdate: str) -> Any:
         return self._read("training status", lambda: self.__api.get_training_status(cdate))
@@ -171,10 +188,25 @@ class GarminDataClient:
     def hill_score(self, cdate: str) -> Any:
         return self._read("hill score", lambda: self.__api.get_hill_score(cdate))
 
-    def cycle_day(self, cdate: str) -> Any:
+    def training_zones(self) -> tuple[Any, Any]:
+        try:
+            heart_rate = self._read("heart rate zones", self.__api.get_heart_rate_zones)
+        except GarminOwlMissingDataError:
+            heart_rate = None
+        try:
+            power = self._read("power zones", self.__api.get_power_zones)
+        except GarminOwlMissingDataError:
+            power = None
+        return heart_rate, power
+
+    def running_tolerance(self, startdate: str, enddate: str) -> Any:
         return self._read(
-            "cycle day", lambda: self.__api.get_menstrual_data_for_date(cdate)
+            "running tolerance",
+            lambda: self.__api.get_running_tolerance(startdate, enddate, "daily"),
         )
+
+    def cycle_day(self, cdate: str) -> Any:
+        return self._read("cycle day", lambda: self.__api.get_menstrual_data_for_date(cdate))
 
     def cycle_calendar(self, startdate: str, enddate: str) -> Any:
         return self._read(
