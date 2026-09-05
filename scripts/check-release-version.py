@@ -26,11 +26,18 @@ def main() -> None:
     server_text = (ROOT / "src/garmin_owl/server.py").read_text(encoding="utf-8")
     server_match = re.search(r'^    version="([^"]+)",$', server_text, re.MULTILINE)
     server_version = server_match.group(1) if server_match else "missing"
+    with (ROOT / "uv.lock").open("rb") as handle:
+        lock = tomllib.load(handle)
+    lock_version = next(
+        (str(package["version"]) for package in lock["package"] if package["name"] == "garmin-owl"),
+        "missing",
+    )
     versions = {
         "pyproject.toml": project_version,
         "manifest.json": manifest_version,
         "src/garmin_owl/__init__.py": init_version,
         "src/garmin_owl/server.py": server_version,
+        "uv.lock": lock_version,
     }
     mismatches = {name: version for name, version in versions.items() if version != expected}
     if mismatches:

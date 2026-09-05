@@ -10,7 +10,7 @@ from .tools import GarminTools
 
 mcp = MCPServer(
     "garmin-owl",
-    version="0.2.0",
+    version="0.2.1",
     instructions=(
         "Read-only access to the local user's Garmin Connect data. "
         "Never claim this is medical advice. No mutation tools exist."
