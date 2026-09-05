@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "garmin-owl",
   "display_name": "Garmin Owl",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local-only, read-only access to your Garmin Connect health and activity data.",
   "long_description": "Garmin Owl runs entirely as a local stdio MCP server. It reads your existing Garmin Connect data on demand through the unofficial python-garminconnect client. It has no write tools, public listener, telemetry, analytics, remote database, or bundled credentials. Garmin session tokens remain in the standard local ~/.garminconnect store.",
   "author": {
@@ -115,7 +115,8 @@
   ],
   "compatibility": {
     "platforms": [
-      "darwin"
+      "darwin",
+      "linux"
     ],
     "runtimes": {
       "python": ">=3.12,<4"

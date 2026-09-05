@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
+from garmin_owl import database as database_module
 from garmin_owl.database import SCHEMA_VERSION, GarminDatabase
 from garmin_owl.models import (
     ActivityDetail,
@@ -14,6 +18,45 @@ from garmin_owl.models import (
     TrainingReadiness,
 )
 from garmin_owl.normalize import normalize_training_load
+
+
+@pytest.mark.parametrize("xdg", [None, "", "relative/path", "~/data", "/custom/data"])
+def test_linux_default_cache_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, xdg: str | None
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    if xdg is not None:
+        monkeypatch.setenv("XDG_DATA_HOME", xdg)
+    base = Path("/custom/data") if xdg == "/custom/data" else tmp_path / ".local/share"
+    assert database_module.default_db_path() == base / "garmin-owl/garmin.sqlite"
+
+
+def test_macos_cache_path_is_preserved(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", "/ignored")
+    assert database_module.default_db_path() == (
+        tmp_path / "Library/Application Support/garmin-owl/garmin.sqlite"
+    )
+
+
+def test_linux_database_path_precedence_and_permissions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("GARMIN_OWL_DB", raising=False)
+    database = GarminDatabase()
+    assert database.path == tmp_path / "data/garmin-owl/garmin.sqlite"
+    assert database.path.stat().st_mode & 0o077 == 0
+    assert database.path.parent.stat().st_mode & 0o077 == 0
+    monkeypatch.setenv("GARMIN_OWL_DB", "~/override/garmin.sqlite")
+    assert GarminDatabase().path == tmp_path / "override/garmin.sqlite"
+    explicit = tmp_path / "explicit/garmin.sqlite"
+    assert GarminDatabase(explicit).path == explicit
 
 
 def test_schema_version_permissions_and_no_sensitive_columns(tmp_path: Path) -> None:

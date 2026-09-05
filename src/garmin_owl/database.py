@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
@@ -46,7 +47,18 @@ TODAY_TTL = timedelta(minutes=20)
 # recomputes some daily aggregates. Treat a day as settled only at noon the following day, and
 # trust a stored row indefinitely only when it was *fetched* after that moment.
 DAY_SETTLES_AT = time(12, 0)
-DEFAULT_DB_PATH = Path.home() / "Library/Application Support/garmin-owl/garmin.sqlite"
+
+
+def default_db_path() -> Path:
+    """Use native local storage, ignoring relative XDG paths on Linux."""
+    if sys.platform == "linux":
+        xdg_data_home = os.environ.get("XDG_DATA_HOME", "")
+        base = Path(xdg_data_home)
+        if not xdg_data_home or not base.is_absolute():
+            base = Path.home() / ".local/share"
+    else:
+        base = Path.home() / "Library/Application Support"
+    return base / "garmin-owl/garmin.sqlite"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily_metrics (
@@ -279,7 +291,7 @@ class GarminDatabase:
 
     def __init__(self, path: Path | str | None = None) -> None:
         env_path = os.environ.get("GARMIN_OWL_DB")
-        self.path = Path(path or env_path or DEFAULT_DB_PATH).expanduser()
+        self.path = Path(path or env_path or default_db_path()).expanduser()
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             self.path.parent.chmod(0o700)

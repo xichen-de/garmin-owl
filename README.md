@@ -1,17 +1,17 @@
 # garmin-owl
 
-`garmin-owl` is a local-only, read-only Garmin MCP server for macOS. It gives an MCP client such as Claude Desktop concise health and training context without uploading a separate copy of your Garmin data or adding any Garmin write capability.
+`garmin-owl` is a local-only, read-only Garmin MCP server for macOS and Ubuntu Linux. It gives an MCP client such as Claude Desktop concise health and training context without uploading a separate copy of your Garmin data or adding any Garmin write capability.
 
 It uses the unofficial [`python-garminconnect`](https://github.com/cyberjunky/python-garminconnect) client, so Garmin API changes may occasionally require updates.
 
 ## Quick start
 
-Requirements: macOS, Python 3.12+, [`uv`](https://docs.astral.sh/uv/), and a Garmin Connect account.
+On macOS or Ubuntu, install [`uv`](https://docs.astral.sh/uv/getting-started/installation/) and Git. You’ll also need a Garmin Connect account. `uv` manages Python 3.12+ and the project environment for you; no manual environment activation is needed.
 
 ```bash
 git clone https://github.com/xichen-de/garmin-owl.git
 cd garmin-owl
-uv sync
+uv sync --locked
 uv run garmin-owl-auth
 ```
 
@@ -22,20 +22,20 @@ Re-run `uv run garmin-owl-auth` any time to check your saved tokens — it only 
 <details>
 <summary><b>Why does this ask for my Garmin password?</b></summary>
 
-Garmin has no public OAuth login for personal Garmin Connect data — the "Sign in with Garmin" redirect flow you'd get from Google or GitHub doesn't exist for individual accounts. Garmin's only OAuth API (the Connect Developer Program) is gated behind a business partnership agreement, not available to a personal script.
-
-So `garmin-owl`, like every other open-source tool that reads personal Garmin data, authenticates the way the official Garmin Connect app does internally: your email and password go directly to Garmin's own login endpoint (`sso.garmin.com`) in exchange for session tokens, and only those tokens are stored locally.
-
-Your credentials are typed once in your own terminal, held in memory for that one login call, and never logged, written to disk, or sent anywhere other than Garmin's servers. In particular, they never reach the MCP client or the model.
+The unofficial Garmin client uses your email, password, and optional MFA code to obtain reusable session tokens from Garmin. Enter these only in the terminal authentication prompt. The project saves tokens locally, not your password; credentials never enter the MCP conversation.
 
 </details>
 
 ## Install in Claude Desktop
 
-1. Authenticate once with `uv run garmin-owl-auth`.
-2. Open Claude Desktop → **Settings** → **Extensions**.
-3. Drag the latest `garmin-owl-*.mcpb` file from `dist/` into the Extensions window.
-4. Enable the extension and restart Claude Desktop if prompted.
+Use the same steps on macOS and Ubuntu with a Claude Desktop installation that supports Extensions:
+
+1. Complete the quick start above, using the same OS user that runs Claude Desktop.
+2. Download a `.mcpb` from [Releases](https://github.com/xichen-de/garmin-owl/releases), or [build your checkout](#build-the-desktop-extension).
+3. Open Claude Desktop → **Settings** → **Extensions** and drag in the `.mcpb` file.
+4. Enable the extension, restart Claude Desktop if prompted, and start a new chat.
+
+The extension uses `uv` and reuses your saved Garmin tokens.
 
 Then try:
 
@@ -46,6 +46,26 @@ Then try:
 - "How does my cycle day line up with my recovery?"
 
 The bundle contains the project source but no credentials, tokens, or health data.
+
+<details>
+<summary><b>Other MCP clients (optional)</b></summary>
+
+For clients that accept `mcpServers` JSON, use this configuration. Replace both placeholder paths with the output of `command -v uv` and `pwd` from the repository. This works on macOS and Ubuntu; the config file location depends on your client.
+
+```json
+{
+  "mcpServers": {
+    "garmin-owl": {
+      "command": "/absolute/path/to/uv",
+      "args": ["--directory", "/absolute/path/to/garmin-owl", "run", "garmin-owl"]
+    }
+  }
+}
+```
+
+Use absolute paths because desktop apps may not inherit your terminal’s `PATH`. Running `uv run garmin-owl` directly waits for MCP messages on stdin; it does not show an interactive prompt.
+
+</details>
 
 ## Available tools
 
@@ -110,7 +130,12 @@ uv run garmin-owl-cache-info      # inspect
 uv run garmin-owl-cache-clear     # clear (leaves auth tokens alone)
 ```
 
-The cache lives at `~/Library/Application Support/garmin-owl/garmin.sqlite`. Set `GARMIN_OWL_DB` to move it.
+The cache lives at:
+
+- **Ubuntu/Linux:** `~/.local/share/garmin-owl/garmin.sqlite`, or `$XDG_DATA_HOME/garmin-owl/garmin.sqlite` when `XDG_DATA_HOME` is an absolute path.
+- **macOS:** `~/Library/Application Support/garmin-owl/garmin.sqlite`.
+
+Set `GARMIN_OWL_DB` to override either default. If you previously ran this project on Linux, set `GARMIN_OWL_DB` to the old `~/Library/Application Support/garmin-owl/garmin.sqlite` path to reuse that cache; otherwise the new cache fills on demand. Tokens remain at `~/.garminconnect` on both platforms.
 
 <details>
 <summary><b>How the cache decides something is stale</b></summary>
@@ -154,13 +179,15 @@ uv run ruff check .
 uv run mypy src tests
 ```
 
-Build the Claude Desktop extension:
+### Build the Desktop extension
+
+On macOS or Ubuntu, install [Node.js LTS](https://nodejs.org/en/download) with npm (which includes `npx`), plus `uv`. From the repository, run:
 
 ```bash
 ./scripts/build-extension.sh
 ```
 
-This validates `manifest.json` and writes a versioned `.mcpb` to `dist/`. It never includes secrets or the local health database.
+The script checks release versions, validates `manifest.json`, and writes `dist/garmin-owl-<version>.mcpb`. The first build needs internet access to download the pinned packaging tool and any missing Python dependencies. Drag the resulting file into Claude Desktop’s Extensions settings to install or update it.
 
 <details>
 <summary><b>Investigating a missing or unlabeled metric</b></summary>
