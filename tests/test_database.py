@@ -270,3 +270,23 @@ def test_unlabeled_status_is_not_recorded_as_an_unavailable_source(tmp_path: Pat
             "SELECT unavailable_sources FROM training_status WHERE date='2026-01-01'"
         ).fetchone()[0]
     assert stored == "hill_score"
+
+
+def test_custom_database_preserves_existing_parent_permissions(tmp_path: Path) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o755)
+    original_mode = parent.stat().st_mode
+    database = GarminDatabase(parent / "garmin.sqlite")
+    assert parent.stat().st_mode == original_mode
+    assert database.path.stat().st_mode & 0o077 == 0
+
+
+def test_clear_with_vacuum_commits_deletions(tmp_path: Path) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    database.put_daily(DailySummary(date="2026-01-01", steps=100))
+    database.mark_synced("readiness", "2026-01-01")
+    database.clear(vacuum=True)
+    assert database.get_daily("2026-01-01") is None
+    assert database.fetched_at("readiness", "2026-01-01") is None
+    with database.connect() as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"

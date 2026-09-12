@@ -293,10 +293,6 @@ class GarminDatabase:
         env_path = os.environ.get("GARMIN_OWL_DB")
         self.path = Path(path or env_path or default_db_path()).expanduser()
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        try:
-            self.path.parent.chmod(0o700)
-        except OSError:
-            pass
         self.initialize()
 
     @contextmanager
@@ -1113,5 +1109,7 @@ class GarminDatabase:
         with self.connect() as connection:
             for table in tables:
                 connection.execute(f"DELETE FROM {table}")
-            if vacuum:
+        if vacuum:
+            # VACUUM must run after the deletion transaction has committed.
+            with self.connect() as connection:
                 connection.execute("VACUUM")

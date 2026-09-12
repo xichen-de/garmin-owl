@@ -75,9 +75,11 @@ class SyncEngine:
         elif resource == "readiness":
             readiness = normalize_training_readiness(self.client.training_readiness(cdate), cdate)
             daily = self.database.get_daily(cdate)
+            daily_fetched_at = self.database.fetched_at("daily", cdate)
             if daily is None:
                 daily = normalize_daily_summary(self.client.daily_summary(cdate), cdate)
-            self.database.put_daily(daily, readiness)
+            # Updating readiness must not renew the freshness of an older daily summary.
+            self.database.put_daily(daily, readiness, now=daily_fetched_at)
             self.database.mark_synced("readiness", cdate)
         else:
             raise ValueError(f"unsupported sync resource: {resource}")

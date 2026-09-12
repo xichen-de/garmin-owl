@@ -465,7 +465,7 @@ wheels = [
 
 [[package]]
 name = "garmin-owl"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "." }
 dependencies = [
     { name = "garminconnect" },
@@ -483,7 +483,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "garminconnect", specifier = ">=0.3.11,<0.4" },
+    { name = "garminconnect", specifier = ">=0.3.13,<0.4" },
     { name = "mcp", specifier = ">=2.0,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.17,<2" },
     { name = "pydantic", specifier = ">=2.11,<3" },
@@ -495,16 +495,16 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "garminconnect"
-version = "0.3.11"
+version = "0.3.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "curl-cffi" },
     { name = "requests" },
     { name = "ua-generator" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/87/06/6e5a241cc004fae441b71903de772ecc30424fb3cd88a28fd8a2b7851a20/garminconnect-0.3.11.tar.gz", hash = "sha256:506198a65351df4ae0ce82b8c317eadf012c238c542d6a557387598e4d9a4044", size = 99452, upload-time = "2026-08-19T07:34:00.43Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/79/a323c0ed2bef6c028d1ce2b070851cce323c0821e2689fc36e2dc2760843/garminconnect-0.3.13.tar.gz", hash = "sha256:d47fb125cd3bbda70022aa9d576c7f90aaae087c76107edb483e32b3569c1a33", size = 101487, upload-time = "2026-09-09T14:51:15.93Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/41/bd/4a9ae7aa9fd5b8d49385ed3fa8e88c68b3e0a1d25b78c63b08be988829b8/garminconnect-0.3.11-py3-none-any.whl", hash = "sha256:58568f339b00cc47d01b2dee347a82c491a45996bb13757a050df03b7049f945", size = 93608, upload-time = "2026-08-19T07:33:59.097Z" },
+    { url = "https://files.pythonhosted.org/packages/8f/24/9c3fda6db391b834adfc46cfa09af8ccfd0a3fce6ba0b2ea66bdc508b5f0/garminconnect-0.3.13-py3-none-any.whl", hash = "sha256:ce93a3ae28f25fa1d8bfc49fbd1630c80b94035bc753f5f8d0dd84b0ccb111ed", size = 95611, upload-time = "2026-09-09T14:51:14.401Z" },
 ]
 
 [[package]]

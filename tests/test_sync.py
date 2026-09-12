@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ from garminconnect import GarminConnectConnectionError
 
 from garmin_owl.client import GarminDataClient, GarminOwlUnavailableError
 from garmin_owl.database import GarminDatabase
+from garmin_owl.models import DailySummary
 from garmin_owl.sync import SyncEngine
 
 
@@ -87,3 +89,23 @@ def test_sync_does_not_cache_transient_failure_as_missing(tmp_path: Path) -> Non
         engine.sync_dates(["2026-01-01"], include_activities=False)
 
     assert database.fetched_at("hrv", "2026-01-01") is None
+
+
+def test_readiness_refresh_does_not_make_stale_daily_summary_fresh(tmp_path: Path) -> None:
+    fake = SyncGarmin()
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    engine = SyncEngine(GarminDataClient(fake), database)  # type: ignore[arg-type]
+    cdate = "2026-01-01"
+    captured = datetime(2026, 1, 1, 10, tzinfo=UTC)
+    database.put_daily(DailySummary(date=cdate, steps=999), now=captured)
+
+    engine.ensure_resource("readiness", cdate)
+
+    assert database.fetched_at("daily", cdate) == captured
+    assert not database.is_fresh("daily", cdate)
+    assert database.is_fresh("readiness", cdate)
+    engine.ensure_resource("daily", cdate)
+    daily = database.get_daily(cdate)
+    readiness = database.get_readiness(cdate)
+    assert daily is not None and daily.steps == 1
+    assert readiness is not None and readiness.score == 1
