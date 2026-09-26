@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from mcp.server import MCPServer
@@ -10,7 +11,7 @@ from .tools import GarminTools
 
 mcp = MCPServer(
     "garmin-owl",
-    version="0.2.3",
+    version="0.2.4",
     instructions=(
         "Read-only access to the local user's Garmin Connect data. "
         "Never claim this is medical advice. No mutation tools exist."
@@ -19,14 +20,18 @@ mcp = MCPServer(
 )
 
 _tools: GarminTools | None = None
+_tools_lock = threading.Lock()
 
 
 def get_tools() -> GarminTools:
     """Authenticate lazily so importing/listing the server never prompts or hits Garmin."""
     global _tools
-    if _tools is None:
-        _tools = GarminTools()
-    return _tools
+    # Synchronous tools run on worker threads; concurrent first calls must not each load
+    # tokens (and possibly refresh them) or open a separate cache.
+    with _tools_lock:
+        if _tools is None:
+            _tools = GarminTools()
+        return _tools
 
 
 @mcp.tool()
@@ -77,7 +82,7 @@ def get_activities(
     end_date: str | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """List concise activities in an inclusive date range; defaults to the last 14 days."""
+    """List activities in an inclusive range of up to 366 days; defaults to the last 14 days."""
     return get_tools().get_activities(start_date, end_date, limit)
 
 
@@ -103,7 +108,7 @@ def get_training_context(date: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def get_recovery_trend(days: int = 7) -> dict[str, Any]:
-    """Trend sleep HR/temp, HRV, RHR, readiness, and Body Battery over 7/14/28 days."""
+    """Trend sleep HR/temp, HRV, RHR, readiness, Body Battery over the last 7/14/28 days."""
     return get_tools().get_recovery_trend(days)
 
 
@@ -137,7 +142,7 @@ def get_recent_activities(
     activity_type: str | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """List recent cached activities with bounded days/limit and optional exact type filter."""
+    """List activities from the last 1-90 days, optionally filtered by type (case-insensitive)."""
     return get_tools().get_recent_activities(days, activity_type, limit)
 
 

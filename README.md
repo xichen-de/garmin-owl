@@ -1,12 +1,23 @@
 # garmin-owl
 
-`garmin-owl` is a local-only, read-only Garmin MCP server for macOS and Ubuntu Linux. It gives an MCP client such as Claude Desktop concise health and training context without uploading a separate copy of your Garmin data or adding any Garmin write capability.
+`garmin-owl` lets Claude Desktop (or another MCP client) answer questions about your Garmin health and training data: sleep, HRV, recovery, activities, training load, and more. It runs entirely on your computer, can only *read* from Garmin Connect, and never uploads a separate copy of your data anywhere.
 
-It uses the unofficial [`python-garminconnect`](https://github.com/cyberjunky/python-garminconnect) client, so Garmin API changes may occasionally require updates.
+It works on macOS and Ubuntu Linux and uses the unofficial [`python-garminconnect`](https://github.com/cyberjunky/python-garminconnect) client, so a change on Garmin's side can occasionally break a read until `garmin-owl` is updated.
 
-## Quick start
+> Want to change the code or build a release? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-On macOS or Ubuntu, install [`uv`](https://docs.astral.sh/uv/getting-started/installation/) and Git. You’ll also need a Garmin Connect account. `uv` manages Python 3.12+ and the project environment for you; no manual environment activation is needed.
+## What you need
+
+- macOS or Ubuntu Linux
+- [Claude Desktop](https://claude.ai/download) with Extensions support, or another MCP client
+- A Garmin Connect account with data from a Garmin device
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) and Git. `uv` installs Python 3.12+ for you, so you never need to set up or activate an environment.
+
+## Setup
+
+### 1. Sign in to Garmin (once)
+
+In a terminal, run this as the same OS user that runs Claude Desktop:
 
 ```bash
 git clone https://github.com/xichen-de/garmin-owl.git
@@ -15,42 +26,29 @@ uv sync --locked
 uv run garmin-owl-auth
 ```
 
-You'll be prompted in your terminal for your Garmin email, password, and MFA code if your account uses one. Only a reusable session token is saved, to `~/.garminconnect`. The MCP server never asks the model for any of these.
+You'll be asked for your Garmin email, password, and MFA code if your account uses one. Your password is **not** stored: only a reusable session token is saved, to `~/.garminconnect` (or to the directory in the `GARMINTOKENS` environment variable, if you set it). Treat that directory like a password.
 
-Re-run `uv run garmin-owl-auth` any time to check your saved tokens — it only re-authenticates if they've expired.
+Re-run `uv run garmin-owl-auth` any time to check your sign-in. It only asks for credentials again if the saved session no longer works.
 
 <details>
 <summary><b>Why does this ask for my Garmin password?</b></summary>
 
-The unofficial Garmin client uses your email, password, and optional MFA code to obtain reusable session tokens from Garmin. Enter these only in the terminal authentication prompt. The project saves tokens locally, not your password; credentials never enter the MCP conversation.
+Garmin has no public API for personal data, so the unofficial client signs in the way the Garmin Connect website does. Your credentials are used once, in the terminal, to obtain session tokens. They never enter an MCP conversation, and Claude never sees them.
 
 </details>
 
-## Install in Claude Desktop
+### 2. Install the Claude Desktop extension
 
-Use the same steps on macOS and Ubuntu with a Claude Desktop installation that supports Extensions:
+1. Download the latest `.mcpb` file from [Releases](https://github.com/xichen-de/garmin-owl/releases).
+2. Open Claude Desktop → **Settings** → **Extensions** and drag the `.mcpb` file in.
+3. Enable the extension, restart Claude Desktop if prompted, and start a new chat.
 
-1. Complete the quick start above, using the same OS user that runs Claude Desktop.
-2. Download a `.mcpb` from [Releases](https://github.com/xichen-de/garmin-owl/releases), or [build your checkout](#build-the-desktop-extension).
-3. Open Claude Desktop → **Settings** → **Extensions** and drag in the `.mcpb` file.
-4. Enable the extension, restart Claude Desktop if prompted, and start a new chat.
-
-The extension uses `uv` and reuses your saved Garmin tokens.
-
-Then try:
-
-- "Summarize my recovery today."
-- "How did I sleep last night?"
-- "Compare my last two activities."
-- "Show my 28-day recovery trend."
-- "How does my cycle day line up with my recovery?"
-
-The bundle contains the project source but no credentials, tokens, or health data.
+The extension reuses the session saved in step 1. It contains the program only, never credentials, tokens, or health data.
 
 <details>
-<summary><b>Other MCP clients (optional)</b></summary>
+<summary><b>Using a different MCP client</b></summary>
 
-For clients that accept `mcpServers` JSON, use this configuration. Replace both placeholder paths with the output of `command -v uv` and `pwd` from the repository. This works on macOS and Ubuntu; the config file location depends on your client.
+For clients that accept `mcpServers` JSON, add the entry below. Replace the two placeholder paths with the output of `command -v uv` and of `pwd` run inside your `garmin-owl` folder. Where the config file lives depends on your client.
 
 ```json
 {
@@ -63,13 +61,25 @@ For clients that accept `mcpServers` JSON, use this configuration. Replace both 
 }
 ```
 
-Use absolute paths because desktop apps may not inherit your terminal’s `PATH`. Running `uv run garmin-owl` directly waits for MCP messages on stdin; it does not show an interactive prompt.
+Use absolute paths, because desktop apps often don't inherit your terminal's `PATH`. Running `uv run garmin-owl` by hand just waits silently for an MCP client, so it isn't an interactive program.
 
 </details>
 
-## Available tools
+### 3. Try it
 
-19 read-only tools. There are no write tools.
+Ask Claude things like:
+
+- "Summarize my recovery today."
+- "How did I sleep last night?"
+- "Compare my last two runs."
+- "Show my 28-day recovery trend."
+- "What did my training week look like around 3 March 2025?"
+- "How has my weight changed over the last year?"
+- "How does my cycle day line up with my recovery?"
+
+## What it can tell you
+
+Claude chooses among 19 read-only tools. None of them can change anything in your Garmin account.
 
 **One day at a time**
 
@@ -81,141 +91,148 @@ Use absolute paths because desktop apps may not inherit your terminal’s `PATH`
 | `get_body_battery` | Charged, drained, and start/end/highest/lowest levels |
 | `get_stress` | Average and max stress, plus durations by intensity band |
 | `get_training_readiness` | Garmin's readiness score, components, and factor feedback |
-| `get_body_composition` | Weight and related measurements over a date range |
 | `get_cycle` | Cycle phase, day, and Garmin predictions |
 
 **Activities and training**
 
 | Tool | Answers |
 | --- | --- |
-| `get_activities` | Activities in a date range, enriched for walking, cycling, and cardio (defaults to the last 14 days) |
-| `get_recent_activities` | Activities from the last N days, optionally filtered by type |
+| `get_activities` | Activity summaries over up to 366 days (defaults to the last 14), at most 100 results |
+| `get_recent_activities` | Activities from the last 1–90 days, optionally filtered by type (for example `running`) |
 | `get_activity` | One activity's laps, training effect, and HR/power zones |
 | `compare_activities` | Side-by-side metrics for 2–10 activities |
 | `get_training_week` | Mon–Sun totals and zone time, with per-metric coverage |
 | `get_training_load` | Acute/chronic load, ratio/status, load focus/targets, VO2 max, endurance, hill, acclimation |
 | `get_training_zones` | Configured HR and cycling-power zone thresholds |
-| `get_running_tolerance` | Garmin running distance, impact load, tolerance, and feedback over 1–90 days |
+| `get_running_tolerance` | Running distance, impact load, tolerance, and feedback over 1–90 days |
 
-**Combined and trends**
+**Body, combined, and trends**
 
 | Tool | Answers |
 | --- | --- |
+| `get_body_composition` | Weight and related measurements over up to 366 days (defaults to the last 30) |
 | `get_recovery` | Sleep, HRV, Body Battery, stress, RHR, and readiness for one day |
-| `get_recovery_trend` | Sleep HR, skin-temperature deviation, HRV, RHR, readiness, and Body Battery across 7, 14, or 28 days |
-| `get_training_context` | Recovery plus the requested date's preceding training |
+| `get_recovery_trend` | Sleep score, sleep HR, skin-temperature deviation, HRV, RHR, readiness, and Body Battery over the last 7, 14, or 28 days |
+| `get_training_context` | One day's recovery plus the 7 days of training before it |
 
-### How results are reported
+### Dates and range limits
 
-- **Garmin values and `garmin-owl` calculations stay distinguishable.** Derived comparisons state their baseline dates, sample count, and formula.
-- **Missing metrics stay missing.** Nothing is guessed, and nothing absent is summed as zero.
-- **Totals disclose their coverage** — how many activities actually reported the metric.
-- **An `availability` list explains every gap**, distinguishing "Garmin had no data" from "unsupported on this device" from "the read failed or was rate-limited."
+You can ask about any past date. The only limit on history is how much Garmin still returns for your account and device. Leave the date out and the tools use today. What *is* limited is how much one request covers:
 
-`get_cycle` intentionally excludes notes, symptoms, moods, sexual activity, and raw daily logs.
+| Coverage per request | Tools |
+| --- | --- |
+| One day (any date) | The "one day at a time" tools, `get_recovery`, `get_training_load` |
+| Up to 366 days | `get_activities`, `get_body_composition` |
+| Up to 90 days | `get_recent_activities` (ending today), `get_running_tolerance` (ending on any date) |
+| Fixed window | `get_recovery_trend`: last 7, 14, or 28 days, ending today<br>`get_training_context`: the 7 days ending on the chosen date<br>`get_training_week`: the Mon–Sun week containing the chosen date |
 
-## Sync and local cache
+`get_activity` and `compare_activities` take activity IDs, not dates, and `get_training_zones` reads your current settings. Activity lists return at most 100 activities per request.
 
-Optional, but makes later requests faster:
+You don't need to know these limits: describe the period in plain language and Claude picks the dates. For longer periods, such as several years of activities, Claude can split the question into several requests. A request that is too long returns an error that states the limit.
+
+### How to read the answers
+
+- **Garmin's numbers and `garmin-owl`'s calculations are kept apart.** Anything calculated (such as "12% above your recent average") states its baseline dates, how many days it used, and its formula.
+- **Missing stays missing.** Nothing is guessed, and an absent value is never counted as zero.
+- **Totals say how complete they are**, for example "distance covers 3 of 4 activities".
+- **Gaps are explained** in an `availability` list: Garmin had no data, the metric is unsupported on your device, or the read failed or was rate-limited.
+- `get_cycle` deliberately leaves out notes, symptoms, moods, sexual activity, and raw daily logs.
+
+## Faster answers with the local cache (optional)
+
+`garmin-owl` keeps what it reads in a small local database, so each day is fetched from Garmin only once. That happens automatically, but you can pre-load history so your first questions are quick:
 
 ```bash
-uv run garmin-owl-sync            # last 7 days
-uv run garmin-owl-sync --days 30
+uv run garmin-owl-sync                                       # last 7 days
+uv run garmin-owl-sync --days 30                             # last 30 days (max 366)
+uv run garmin-owl-sync --start 2025-01-01 --end 2025-12-31   # any past window
 ```
 
-This loads daily summaries, sleep, HRV, training readiness, and activity summaries, fetching only what's missing or stale. Body Battery, stress, activity details, and cycle data are fetched on demand instead.
+- A single run covers at most **366 days**. `--days` counts back from today. `--start` can be any past date, and `--end` defaults to today.
+- To load more than a year, run one window per year. Days already cached are skipped.
+- `--refresh-today` or `--refresh-date YYYY-MM-DD` re-fetches a day even if it's cached.
+- Sync pre-loads daily summaries, sleep, HRV, training readiness, and activity lists. Body Battery, stress, activity details, training load, body composition, and cycle data are fetched the first time you ask, then cached.
+
+Inspect or clear the cache (clearing never touches your Garmin sign-in):
 
 ```bash
-uv run garmin-owl-cache-info      # inspect
-uv run garmin-owl-cache-clear     # clear (leaves auth tokens alone)
+uv run garmin-owl-cache-info
+uv run garmin-owl-cache-clear
 ```
 
-The cache lives at:
+The cache is stored at:
 
-- **Ubuntu/Linux:** `~/.local/share/garmin-owl/garmin.sqlite`, or `$XDG_DATA_HOME/garmin-owl/garmin.sqlite` when `XDG_DATA_HOME` is an absolute path.
-- **macOS:** `~/Library/Application Support/garmin-owl/garmin.sqlite`.
+- **macOS:** `~/Library/Application Support/garmin-owl/garmin.sqlite`
+- **Ubuntu/Linux:** `~/.local/share/garmin-owl/garmin.sqlite`, or under `$XDG_DATA_HOME` when that is set to an absolute path
 
-Set `GARMIN_OWL_DB` to override either default. If you previously ran this project on Linux, set `GARMIN_OWL_DB` to the old `~/Library/Application Support/garmin-owl/garmin.sqlite` path to reuse that cache; otherwise the new cache fills on demand. Tokens remain at `~/.garminconnect` on both platforms.
+Set `GARMIN_OWL_DB` to use a different file. If you used a version before 0.2.1 on Linux, your old cache is at the macOS-style path above. Point `GARMIN_OWL_DB` at it to keep it, or let the new cache fill up by itself.
 
 <details>
-<summary><b>How the cache decides something is stale</b></summary>
+<summary><b>When is cached data refreshed?</b></summary>
 
-Watches and scales upload late, so a calendar day is treated as settled only at **noon the following day**.
-
-A record is trusted indefinitely once it was *fetched* after its day settled. A record captured while the day was still synchronizing is reused for at most 20 minutes, then re-fetched — so a partially synced day never becomes permanently authoritative. The same rule covers date ranges and cached activity details.
+Watches and scales upload late, so a day counts as final only from **noon the next day**. Data fetched after that point is kept for good. Data fetched earlier, while the day could still change, is reused for at most 20 minutes and then fetched again. Today's numbers therefore stay current, and a half-synced day never gets stuck in the cache.
 
 </details>
+
+## Updating
+
+1. Download the new `.mcpb` from [Releases](https://github.com/xichen-de/garmin-owl/releases) and drag it into **Settings** → **Extensions** again. It replaces the old version.
+2. Update your terminal copy, which is used for `garmin-owl-auth`, sync, and the cache commands:
+
+   ```bash
+   cd garmin-owl
+   git pull
+   uv sync --locked
+   ```
+
+The cache upgrades itself when needed. Your saved sign-in carries over.
 
 ## Troubleshooting
 
-`garmin-owl` never retries automatically and never surfaces raw Garmin responses, so error messages are short.
+First, check that sign-in and the main reads work. The output shows only pass/fail per read, never your data:
+
+```bash
+uv run garmin-owl-smoke
+```
+
+`garmin-owl` never retries automatically and never shows raw Garmin responses, so error messages are short:
 
 | Message contains | Meaning | Fix |
 | --- | --- | --- |
-| "No local Garmin tokens found" | Not authenticated yet, or `~/.garminconnect` was deleted | Run `uv run garmin-owl-auth` |
-| "authentication expired or was rejected" | Garmin logged the session out (e.g. after a password change) | Run `uv run garmin-owl-auth` again |
-| "rate limit reached" | Too many Garmin requests too quickly | Wait a few minutes; running `garmin-owl-sync` less often also helps |
-| "Garmin Connect is unavailable" | A transient network or Garmin outage | Try again later |
-| "unexpected response shape" | Garmin changed a private endpoint's fields | [Open an issue](https://github.com/xichen-de/garmin-owl/issues) with the tool name (never paste your Garmin data) |
-| "no data for this request" | That metric isn't recorded for that date or device | Expected for unsupported metrics; not an error to fix |
+| "No local Garmin tokens found" | Not signed in yet, or `~/.garminconnect` was deleted | Run `uv run garmin-owl-auth` |
+| "authentication expired or was rejected" | Garmin ended the session, for example after a password change | Run `uv run garmin-owl-auth` again |
+| "rate limit reached" | Too many Garmin requests in a short time | Wait a few minutes. Sync smaller ranges. |
+| "Garmin Connect is unavailable" | A network problem or Garmin outage | Try again later |
+| "unexpected response shape" | Garmin changed a private endpoint | [Open an issue](https://github.com/xichen-de/garmin-owl/issues) naming the tool (never paste your Garmin data) |
+| "no data for this request" | That metric isn't recorded for that date or device | Expected for unsupported metrics |
+| "date range cannot exceed" / "days must be between" | The request was longer than the tool allows | Ask for a shorter period, or several periods |
+| "Unsupported garmin-owl cache schema" | The cache was created by a newer version | Update `garmin-owl`, or run `uv run garmin-owl-cache-clear` |
 
-If the extension doesn't appear after installing, confirm the `.mcpb` matches the one built for your checkout and restart Claude Desktop. If tools time out on first use, run `uv run garmin-owl-sync` once so the cache is warm.
+- **Extension doesn't appear:** make sure you installed a `.mcpb` from Releases (or one built from the same version as your checkout), then restart Claude Desktop.
+- **Tools time out the first time:** run `uv run garmin-owl-sync` once to warm the cache.
+- **Sign-in works in the terminal but not in Claude:** run `garmin-owl-auth` as the same OS user that runs Claude Desktop, and if you set `GARMINTOKENS`, make sure Claude Desktop sees it too.
 
 ## Privacy and safety
 
-- Garmin access is read-only, over local stdio.
-- Tokens stay in `~/.garminconnect`; normalized data stays in the local SQLite cache.
-- Output excludes credentials, account identifiers, raw GPS coordinates, and private cycle logs.
+- Everything runs locally and talks to your MCP client only over local stdio. There is no network listener, telemetry, or remote database.
+- Garmin access is read-only. `garmin-owl` has no tool that can change your account.
+- Tokens stay in `~/.garminconnect`. Only normalized numbers are stored in the local cache, never raw Garmin responses.
+- Answers exclude credentials, account identifiers, raw GPS coordinates, and private cycle logs.
 - Health summaries are informational, **not medical advice**.
 
-Review your MCP client's own privacy and data-retention settings before sending health information to any model.
-
-## Development
-
-```bash
-uv sync --extra dev
-uv run pytest
-uv run ruff check .
-uv run mypy src tests
-```
-
-### Build the Desktop extension
-
-On macOS or Ubuntu, install [Node.js LTS](https://nodejs.org/en/download) with npm (which includes `npx`), plus `uv`. From the repository, run:
-
-```bash
-./scripts/build-extension.sh
-```
-
-The script checks release versions, validates `manifest.json`, and writes `dist/garmin-owl-<version>.mcpb`. The first build needs internet access to download the pinned packaging tool and any missing Python dependencies. Drag the resulting file into Claude Desktop’s Extensions settings to install or update it.
-
-<details>
-<summary><b>Investigating a missing or unlabeled metric</b></summary>
-
-All three commands below are redacted by design: they report structure, key names, and exception classes only — never response values.
-
-Check a live connection:
-
-```bash
-uv run garmin-owl-smoke --activity-id ACTIVITY_ID
-```
-
-Garmin returns `trainingStatus` as an unlabeled numeric code. `garmin-owl` reports it as `training_status_code` and does not guess what a code means; `training_status` is populated only when Garmin also sends wording. To see whether your account's response carries a label key:
-
-```bash
-uv run python -m garmin_owl.diagnostic --training-status 2026-08-31
-```
-
-To check whether a metric is reachable at all through reads `garmin-owl` is already permitted to make, scan those responses for matching key names. This goes through the same allow-list the server uses, so it cannot look anywhere the server itself cannot:
-
-```bash
-uv run python -m garmin_owl.diagnostic --find-keys 2026-08-31 temp
-```
-
-</details>
+What you ask Claude, and the answers it gets from `garmin-owl`, are handled under your MCP client's privacy and data-retention settings, so review those before sharing health information with any model.
 
 ## Limitations and removal
 
-Garmin Connect is a private API, and metric availability varies by device and account. If Garmin changes an endpoint, authentication or individual reads may temporarily fail.
+Garmin Connect's API is private, and which metrics exist depends on your device and account. When Garmin changes an endpoint, sign-in or individual reads can fail until `garmin-owl` is updated.
 
-To remove `garmin-owl`, uninstall the extension in Claude Desktop and delete the repository, and optionally the SQLite cache. Remove `~/.garminconnect` only if you also want to discard Garmin tokens used by other tools.
+To remove `garmin-owl`:
+
+1. Uninstall the extension in Claude Desktop.
+2. Delete your `garmin-owl` folder.
+3. Optionally delete the cache file listed above.
+4. Delete `~/.garminconnect` only if no other Garmin tool uses those tokens.
+
+## Contributing
+
+Bug reports and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains the project layout, design rules, tests, and release process.

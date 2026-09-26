@@ -51,7 +51,7 @@ def main() -> None:
             normalize_training_readiness(client.training_readiness(cdate), cdate),
         )
         recent_start = (date.today() - timedelta(days=13)).isoformat()
-        activities = normalize_activities(client.activities(recent_start, cdate, 1), 1)
+        activities = normalize_activities(client.activities(recent_start, cdate, 1))
         check("latest activity", activities)
         if activities:
             summary, hr, power = client.activity(activities[0].activity_id)

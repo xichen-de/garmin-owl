@@ -98,8 +98,10 @@ class SyncEngine:
         key = f"{start}:{end}"
         if self.database.is_activity_range_fresh(start, end, force=force):
             return False
-        raw = self.client.activities(start, end, 100)
-        for item in normalize_activities(raw, 100):
+        # Upstream pages through the whole range before returning, so keep every activity.
+        # Truncating here silently dropped the oldest ones from long ranges while the range
+        # was still recorded as fully synced.
+        for item in normalize_activities(self.client.activities(start, end)):
             self.database.put_activity_summary(item)
         self.database.mark_synced("activities", key)
         return True
@@ -154,11 +156,19 @@ class SyncEngine:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Incrementally update the local Garmin cache.")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--days", type=int, default=7)
-    group.add_argument("--start")
-    parser.add_argument("--end")
-    parser.add_argument("--refresh-today", action="store_true")
-    parser.add_argument("--refresh-date")
+    group.add_argument(
+        "--days", type=int, default=7, help="sync the last N days, ending today (default: 7)"
+    )
+    group.add_argument("--start", metavar="YYYY-MM-DD", help="first date to sync")
+    parser.add_argument(
+        "--end", metavar="YYYY-MM-DD", help="last date to sync with --start (default: today)"
+    )
+    parser.add_argument(
+        "--refresh-today", action="store_true", help="re-fetch today even if cached"
+    )
+    parser.add_argument(
+        "--refresh-date", metavar="YYYY-MM-DD", help="re-fetch one date inside the range"
+    )
     return parser
 
 

@@ -141,17 +141,17 @@ class GarminDataClient:
     def stress(self, cdate: str) -> Any:
         return self._read("stress", lambda: self.__api.get_stress_data(cdate))
 
-    def activities(self, startdate: str, enddate: str, limit: int) -> Any:
+    def activities(self, startdate: str, enddate: str, limit: int | None = None) -> Any:
         """Read activities for an explicit inclusive date range only.
 
         The unbounded "most recent N activities" read is deliberately not exposed: it cannot be
         anchored to a requested date, so a historical question could be answered with today's
-        training.
+        training.  ``limit=None`` keeps every activity upstream already paged through.
         """
         data = self._read(
             "activities", lambda: self.__api.get_activities_by_date(startdate, enddate)
         )
-        return data[:limit] if isinstance(data, list) else data
+        return data[:limit] if limit is not None and isinstance(data, list) else data
 
     def activity(self, activity_id: int) -> tuple[Any, Any, Any]:
         activity_key = str(activity_id)

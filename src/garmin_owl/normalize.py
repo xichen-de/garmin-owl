@@ -33,8 +33,8 @@ from .notices import (
     DATE_MISMATCH,
     MISSING_OR_UNSUPPORTED,
     body_battery_notice,
+    cycle_derived_notices,
     cycle_notices,
-    derived_notice,
     unavailable_source_notice,
     unlabeled_status_notice,
 )
@@ -413,7 +413,7 @@ def normalize_activity(raw: Any) -> ActivitySummary:
     )
 
 
-def normalize_activities(raw: Any, limit: int) -> list[ActivitySummary]:
+def normalize_activities(raw: Any, limit: int | None = None) -> list[ActivitySummary]:
     result: list[ActivitySummary] = []
     for item in _list(raw)[:limit]:
         try:
@@ -827,22 +827,7 @@ def normalize_cycle(raw_day: Any, raw_calendar: Any, date: str) -> CycleSummary:
         if predicted and predicted_start and predicted_start >= date:
             predicted_dates.append(predicted_start)
 
-    availability: list[AvailabilityNotice] = []
-    if fertile_start:
-        availability.append(
-            derived_notice(
-                "fertile_window_start",
-                "cycle_start_date + (Garmin's fertileWindowStart day-of-cycle - 1); Garmin "
-                "returns day offsets, not dates.",
-            )
-        )
-    if fertile_end:
-        availability.append(
-            derived_notice(
-                "fertile_window_end",
-                "fertile_window_start + (Garmin's lengthOfFertileWindow - 1) days.",
-            )
-        )
+    availability = cycle_derived_notices(fertile_start, fertile_end)
     if not summary:
         availability.append(cycle_notices("unsupported_or_not_configured", date)[0])
     return CycleSummary(
@@ -862,14 +847,46 @@ def normalize_cycle(raw_day: Any, raw_calendar: Any, date: str) -> CycleSummary:
     )
 
 
+def _weigh_in_timestamp(data: Mapping[str, Any]) -> str | None:
+    """Return an ISO local timestamp whose first ten characters are the weigh-in's date.
+
+    Garmin's weight range read reports ``date`` as epoch milliseconds of local wall time.  Kept
+    as digits it could neither be read as a time nor matched by the cache's date filter, so a
+    cached weigh-in was never returned.
+    """
+    value = _first(data, "timestampLocal", "date", "calendarDate", "summaryDate")
+    number = _number(value) if not isinstance(value, str) else None
+    if number is None:
+        return _text(value)
+    seconds = number / 1000 if number > 10_000_000_000 else number
+    try:
+        return datetime.fromtimestamp(seconds, tz=UTC).replace(tzinfo=None).isoformat()
+    except (OSError, OverflowError, ValueError):
+        return _text(_first(data, "calendarDate", "summaryDate"))
+
+
+def _weigh_ins(items: Any) -> list[Mapping[str, Any]]:
+    """Flatten ``dailyWeightSummaries`` entries, which nest each weigh-in under the day."""
+    result: list[Mapping[str, Any]] = []
+    for item in _list(items):
+        data = _map(item)
+        nested = _list(data.get("allWeightMetrics")) or (
+            [data["latestWeight"]] if isinstance(data.get("latestWeight"), Mapping) else []
+        )
+        if nested:
+            result.extend(_map(entry) for entry in nested)
+        else:
+            result.append(data)
+    return result
+
+
 def normalize_body_composition(raw: Any) -> list[BodyCompositionEntry]:
     root = _map(raw)
     items = _first(root, "dateWeightList", "dailyWeightSummaries", "weightList")
     if items is None and isinstance(raw, list):
         items = raw
     result: list[BodyCompositionEntry] = []
-    for item in _list(items):
-        data = _map(item)
+    for data in _weigh_ins(items):
         weight = _number(_first(data, "weight", "weightInGrams", "weightValue"))
         if weight is not None and weight > 500:
             weight /= 1000
@@ -881,7 +898,7 @@ def normalize_body_composition(raw: Any) -> list[BodyCompositionEntry]:
             bone /= 1000
         result.append(
             BodyCompositionEntry(
-                timestamp=_text(_first(data, "timestampLocal", "date", "calendarDate")),
+                timestamp=_weigh_in_timestamp(data),
                 weight_kg=weight,
                 bmi=_number(data.get("bmi")),
                 body_fat_percent=_number(_first(data, "bodyFat", "bodyFatPercent")),

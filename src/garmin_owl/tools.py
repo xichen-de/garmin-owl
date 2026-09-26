@@ -328,25 +328,22 @@ class GarminTools:
 
     def get_activity(self, activity_id: int) -> dict[str, Any]:
         validate_activity_id(activity_id)
+        prior: ActivityDetail | None = None
         if self.database is not None:
             cached = self.database.get_activity(activity_id, require_detail=True)
             if cached is not None:
                 return cached.compact()
             prior = self.database.get_activity(activity_id)
-            summary, hr_zones, power_zones = self.client.activity(activity_id)
-            laps = summary.get("lapDTOs") if isinstance(summary, dict) else None
-            detail = normalize_activity_detail(summary, laps, hr_zones, power_zones)
-            detail.availability.extend(_zone_availability(hr_zones, power_zones))
+        summary, hr_zones, power_zones = self.client.activity(activity_id)
+        laps = summary.get("lapDTOs") if isinstance(summary, dict) else None
+        detail = normalize_activity_detail(summary, laps, hr_zones, power_zones)
+        detail.availability.extend(_zone_availability(hr_zones, power_zones))
+        if self.database is not None:
             if prior is not None and detail.summary.average_cadence is None:
                 detail.summary = detail.summary.model_copy(
                     update={"average_cadence": prior.summary.average_cadence}
                 )
             self.database.put_activity_detail(detail)
-            return detail.compact()
-        summary, hr_zones, power_zones = self.client.activity(activity_id)
-        laps = summary.get("lapDTOs") if isinstance(summary, dict) else None
-        detail = normalize_activity_detail(summary, laps, hr_zones, power_zones)
-        detail.availability.extend(_zone_availability(hr_zones, power_zones))
         return detail.compact()
 
     def get_body_composition(
@@ -382,8 +379,10 @@ class GarminTools:
         end = date.today()
         start = end - timedelta(days=days - 1)
         if self.database is None or self.sync is None:
+            # Filter by type before applying the limit, or other types could crowd out matches.
+            fetch_limit = MAX_ACTIVITIES if activity_type else limit
             items = normalize_activities(
-                self.client.activities(start.isoformat(), end.isoformat(), limit), limit
+                self.client.activities(start.isoformat(), end.isoformat(), fetch_limit)
             )
             if activity_type:
                 items = [
@@ -515,14 +514,17 @@ class GarminTools:
             row = by_date.setdefault(cdate, {"date": cdate})
             if row.get("training_readiness") is not None:
                 continue
+            # Go through the cache so each day is read from Garmin once, not on every trend
+            # request; days whose readiness is already fresh (even if empty) cost nothing.
             try:
-                readiness = normalize_training_readiness(
-                    self.client.training_readiness(cdate), cdate
-                )
+                if not self.sync.ensure_resource("readiness", cdate):
+                    continue
             except GarminOwlMissingDataError:
                 continue
-            row["training_readiness"] = readiness.score
-            row["recovery_time_minutes"] = readiness.recovery_time_minutes
+            readiness = self.database.get_readiness(cdate)
+            if readiness is not None:
+                row["training_readiness"] = readiness.score
+                row["recovery_time_minutes"] = readiness.recovery_time_minutes
         point_fields = (
             "sleep_score",
             "nightly_avg_ms",

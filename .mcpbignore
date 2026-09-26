@@ -18,3 +18,4 @@ oauth*_token.json
 .garminconnect/
 *.mcpb
 *.dxt
+CONTRIBUTING.md

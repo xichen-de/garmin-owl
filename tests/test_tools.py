@@ -613,3 +613,99 @@ def test_trend_carries_body_battery_totals_without_extra_garmin_calls(
     # Existing daily values are reused; one compact sleep-range read adds the newly supported
     # overnight change, sleep HR, and skin-temperature deviation without per-day reads.
     assert fake.calls == ["get_sleep_daily"]
+
+
+class FertileWindowGarmin(FakeGarmin):
+    def get_menstrual_data_for_date(self, fordate: str) -> dict[str, Any]:
+        return self._record(
+            "get_menstrual_data_for_date",
+            {
+                "daySummary": {
+                    "currentPhase": 2,
+                    "startDate": "2026-01-01",
+                    "fertileWindowStart": 10,
+                    "lengthOfFertileWindow": 6,
+                }
+            },
+        )
+
+    def get_menstrual_calendar_data(self, startdate: str, enddate: str) -> dict[str, Any]:
+        return self._record("get_menstrual_calendar_data", {"cycleSummaries": []})
+
+
+def test_cycle_cache_hit_keeps_the_derived_fertile_window_notices(tmp_path: Path) -> None:
+    fake = FertileWindowGarmin()
+    tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
+    live = tools.get_cycle("2026-01-12")
+    cached = tools.get_cycle("2026-01-12")
+    assert fake.calls == ["get_menstrual_data_for_date", "get_menstrual_calendar_data"]
+    assert live == cached
+    assert {item["field"] for item in cached["availability"]} == {
+        "fertile_window_start",
+        "fertile_window_end",
+    }
+
+
+class ManyActivitiesGarmin(FakeGarmin):
+    def get_activities_by_date(
+        self, startdate: str, enddate: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self._record(
+            "get_activities_by_date",
+            [
+                {"activityId": i, "startTimeLocal": f"2026-01-{i % 28 + 1:02d} 08:00:00"}
+                for i in range(1, 151)
+            ],
+        )
+
+
+def test_activity_sync_keeps_every_activity_in_the_range(tmp_path: Path) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    tools = GarminTools(_client(ManyActivitiesGarmin()), database)
+    assert tools.sync is not None
+    tools.sync.ensure_activities("2026-01-01", "2026-01-28")
+    assert database.info().table_rows["activities"] == 150
+
+
+class WeightSummaryGarmin(FakeGarmin):
+    def get_weigh_ins(self, startdate: str, enddate: str) -> dict[str, Any]:
+        # 2026-01-05 07:30 local wall time, as epoch milliseconds.
+        stamp = int(datetime(2026, 1, 5, 7, 30, tzinfo=UTC).timestamp() * 1000)
+        return self._record(
+            "get_weigh_ins",
+            {
+                "dailyWeightSummaries": [
+                    {
+                        "summaryDate": "2026-01-05",
+                        "allWeightMetrics": [
+                            {"date": stamp, "calendarDate": "2026-01-05", "weight": 70250}
+                        ],
+                    }
+                ]
+            },
+        )
+
+
+def test_body_composition_reads_nested_daily_weight_summaries(tmp_path: Path) -> None:
+    fake = WeightSummaryGarmin()
+    tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
+    result = tools.get_body_composition("2026-01-01", "2026-01-10")
+    assert result == [{"timestamp": "2026-01-05T07:30:00", "weight_kg": 70.25}]
+
+
+def test_trend_reads_missing_readiness_from_garmin_only_once(tmp_path: Path) -> None:
+    fake = FakeGarmin()
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    tools = GarminTools(_client(fake), database)
+    for day in range(1, 8):
+        cdate = f"2026-01-{day:02d}"
+        database.put_daily(DailySummary(date=cdate, resting_hr_bpm=50))
+        database.put_sleep(SleepSummary(date=cdate, sleep_score=80))
+        database.put_hrv(HrvSummary(date=cdate, nightly_average_ms=60))
+
+    first = tools._recovery_trend(7, date(2026, 1, 7)).compact()
+    readiness_reads = fake.calls.count("get_training_readiness")
+    tools._recovery_trend(7, date(2026, 1, 7))
+    assert readiness_reads == 7
+    assert fake.calls.count("get_training_readiness") == readiness_reads
+    assert first["points"][-1]["training_readiness"] == 75

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
@@ -36,6 +37,7 @@ from .notices import (
     MISSING_OR_UNSUPPORTED,
     TRAINING_LOAD_SOURCES,
     body_battery_notice,
+    cycle_derived_notices,
     cycle_notices,
     unavailable_source_notice,
     unlabeled_status_notice,
@@ -59,6 +61,7 @@ def default_db_path() -> Path:
     else:
         base = Path.home() / "Library/Application Support"
     return base / "garmin-owl/garmin.sqlite"
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS daily_metrics (
@@ -293,18 +296,29 @@ class GarminDatabase:
         env_path = os.environ.get("GARMIN_OWL_DB")
         self.path = Path(path or env_path or default_db_path()).expanduser()
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # One connection per repository instead of one per query: a single tool call can issue
+        # dozens of small reads, and reopening SQLite (plus its pragmas) each time dominated them.
+        # MCP runs synchronous tools on worker threads, so access is serialized by a lock.
+        self._lock = threading.RLock()
+        self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA foreign_keys = ON")
         self.initialize()
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        try:
-            yield connection
-            connection.commit()
-        finally:
-            connection.close()
+        """Yield the shared connection as one transaction: commit on success, else roll back."""
+        with self._lock:
+            try:
+                yield self._connection
+            except BaseException:
+                self._connection.rollback()
+                raise
+            self._connection.commit()
 
     def initialize(self) -> None:
         with self.connect() as connection:
@@ -314,13 +328,16 @@ class GarminDatabase:
                     f"Unsupported garmin-owl cache schema {version}; expected {SCHEMA_VERSION}."
                 )
             connection.executescript(SCHEMA)
+            existing: dict[str, set[str]] = {}
             for table, column, column_type in ADDED_COLUMNS:
-                existing = {
-                    str(row["name"])
-                    for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-                }
-                if column not in existing:
+                if table not in existing:
+                    existing[table] = {
+                        str(row["name"])
+                        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+                    }
+                if column not in existing[table]:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+                    existing[table].add(column)
             if version < 5:
                 # Version 5 exposes additional scalars from reads that older rows already
                 # claimed were complete. Preserve the normalized cache, but make those rows
@@ -341,19 +358,27 @@ class GarminDatabase:
         except OSError:
             pass
 
-    def _upsert(self, table: str, key: str, values: Mapping[str, Any]) -> bool:
+    def _upsert(
+        self,
+        table: str,
+        key: str,
+        values: Mapping[str, Any],
+        connection: sqlite3.Connection | None = None,
+    ) -> bool:
+        if connection is None:
+            with self.connect() as owned:
+                return self._upsert(table, key, values, owned)
         columns = list(values)
         placeholders = ", ".join("?" for _ in columns)
         updates = ", ".join(f"{column}=excluded.{column}" for column in columns if column != key)
-        with self.connect() as connection:
-            existed = connection.execute(
-                f"SELECT 1 FROM {table} WHERE {key} = ?", (values[key],)
-            ).fetchone()
-            connection.execute(
-                f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
-                f"ON CONFLICT({key}) DO UPDATE SET {updates}",
-                tuple(values[column] for column in columns),
-            )
+        existed = connection.execute(
+            f"SELECT 1 FROM {table} WHERE {key} = ?", (values[key],)
+        ).fetchone()
+        connection.execute(
+            f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT({key}) DO UPDATE SET {updates}",
+            tuple(values[column] for column in columns),
+        )
         return existed is None
 
     def fetched_at(self, resource: str, key: str) -> datetime | None:
@@ -989,9 +1014,13 @@ class GarminDatabase:
 
     def recovery_rows(self, start_date: str, end_date: str) -> list[sqlite3.Row]:
         with self.connect() as connection:
+            # Bound each branch by the primary key so only the requested window is read,
+            # instead of unioning every cached date before filtering.
             return connection.execute(
-                "WITH dates AS (SELECT date FROM daily_metrics UNION SELECT date FROM sleep "
-                "UNION SELECT date FROM hrv) "
+                "WITH dates AS ("
+                "SELECT date FROM daily_metrics WHERE date BETWEEN :start AND :end "
+                "UNION SELECT date FROM sleep WHERE date BETWEEN :start AND :end "
+                "UNION SELECT date FROM hrv WHERE date BETWEEN :start AND :end) "
                 "SELECT dates.date,d.resting_hr_bpm,d.training_readiness,d.recovery_time_minutes,"
                 "d.body_battery_charged,d.body_battery_drained,"
                 "s.sleep_score,s.average_hr_bpm,s.skin_temperature_deviation_c,"
@@ -999,24 +1028,28 @@ class GarminDatabase:
                 "FROM dates "
                 "LEFT JOIN daily_metrics d ON d.date=dates.date "
                 "LEFT JOIN sleep s ON s.date=dates.date LEFT JOIN hrv h ON h.date=dates.date "
-                "WHERE dates.date BETWEEN ? AND ? ORDER BY dates.date",
-                (start_date, end_date),
+                "ORDER BY dates.date",
+                {"start": start_date, "end": end_date},
             ).fetchall()
 
     def put_body_composition(
         self, items: list[BodyCompositionEntry], *, now: datetime | None = None
     ) -> tuple[int, int]:
         inserted = updated = 0
-        for item in items:
-            if item.timestamp is None:
-                continue
-            created = self._upsert(
-                "body_composition",
-                "timestamp",
-                {**item.model_dump(), "fetched_at": _timestamp(now)},
-            )
-            inserted += int(created)
-            updated += int(not created)
+        stamp = _timestamp(now)
+        # One transaction for the whole batch rather than a commit per weigh-in.
+        with self.connect() as connection:
+            for item in items:
+                if item.timestamp is None:
+                    continue
+                created = self._upsert(
+                    "body_composition",
+                    "timestamp",
+                    {**item.model_dump(), "fetched_at": stamp},
+                    connection,
+                )
+                inserted += int(created)
+                updated += int(not created)
         return inserted, updated
 
     def get_body_composition(self, start_date: str, end_date: str) -> list[BodyCompositionEntry]:
@@ -1051,7 +1084,15 @@ class GarminDatabase:
             return None
         data = dict(row)
         status = str(data.pop("data_status") or "available")
-        return CycleSummary(**data, availability=cycle_notices(status, cdate))
+        # The derived fertile-window notices are rebuilt from the stored dates so a cache hit
+        # discloses the same garmin-owl calculations as the original read.
+        return CycleSummary(
+            **data,
+            availability=[
+                *cycle_derived_notices(data["fertile_window_start"], data["fertile_window_end"]),
+                *cycle_notices(status, cdate),
+            ],
+        )
 
     def _row(self, table: str, key: str, value: Any) -> sqlite3.Row | None:
         with self.connect() as connection:

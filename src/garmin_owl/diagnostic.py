@@ -191,7 +191,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.activity_id is None and args.training_status is None and args.find_keys is None:
-        parser.error("give an activity_id, --training-status DATE, --find-keys DATE SUBSTRING")
+        parser.error("give an activity_id, --training-status DATE, or --find-keys DATE SUBSTRING")
     observations: list[dict[str, Any]] = []
     failed = False
     try:

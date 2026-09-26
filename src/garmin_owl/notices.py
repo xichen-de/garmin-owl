@@ -87,6 +87,29 @@ def derived_notice(field: str, formula: str) -> AvailabilityNotice:
     )
 
 
+def cycle_derived_notices(
+    fertile_window_start: str | None, fertile_window_end: str | None
+) -> list[AvailabilityNotice]:
+    """Disclose the fertile-window dates garmin-owl calculates from Garmin's day offsets."""
+    notices: list[AvailabilityNotice] = []
+    if fertile_window_start:
+        notices.append(
+            derived_notice(
+                "fertile_window_start",
+                "cycle_start_date + (Garmin's fertileWindowStart day-of-cycle - 1); Garmin "
+                "returns day offsets, not dates.",
+            )
+        )
+    if fertile_window_end:
+        notices.append(
+            derived_notice(
+                "fertile_window_end",
+                "fertile_window_start + (Garmin's lengthOfFertileWindow - 1) days.",
+            )
+        )
+    return notices
+
+
 def partial_coverage_notice(
     field: str, covered: int, total: int, detail: str
 ) -> AvailabilityNotice:
