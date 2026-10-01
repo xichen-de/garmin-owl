@@ -19,3 +19,17 @@ oauth*_token.json
 *.mcpb
 *.dxt
 CONTRIBUTING.md
+# OpenAI adapter files are not needed by Claude.
+plugin.json
+mcp.json
+scripts/launch-chatgpt.sh
+scripts/build-chatgpt-plugin.py
+# Exclude local cache/state regardless of where it was created.
+*.sqlite*
+*.db
+*.db-*
+.env*
+.agents/
+.codex/
+node_modules/
+build/
