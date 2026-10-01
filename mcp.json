@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "garmin-owl": {
+      "type": "stdio",
+      "command": "./scripts/launch-chatgpt.sh",
+      "args": ["${PLUGIN_ROOT}"],
+      "cwd": "${PLUGIN_ROOT}",
+      "env": {
+        "UV_PROJECT_ENVIRONMENT": "${PLUGIN_DATA}/venv"
+      }
+    }
+  }
+}

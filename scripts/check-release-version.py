@@ -20,6 +20,8 @@ def main() -> None:
         project_version = str(tomllib.load(handle)["project"]["version"])
     with (ROOT / "manifest.json").open(encoding="utf-8") as handle:
         manifest_version = str(json.load(handle)["version"])
+    with (ROOT / "plugin.json").open(encoding="utf-8") as handle:
+        plugin_version = str(json.load(handle)["version"])
     init_text = (ROOT / "src/garmin_owl/__init__.py").read_text(encoding="utf-8")
     match = re.search(r'^__version__ = "([^"]+)"$', init_text, re.MULTILINE)
     init_version = match.group(1) if match else "missing"
@@ -35,6 +37,7 @@ def main() -> None:
     versions = {
         "pyproject.toml": project_version,
         "manifest.json": manifest_version,
+        "plugin.json": plugin_version,
         "src/garmin_owl/__init__.py": init_version,
         "src/garmin_owl/server.py": server_version,
         "uv.lock": lock_version,

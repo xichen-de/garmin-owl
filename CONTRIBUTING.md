@@ -100,7 +100,7 @@ These are the project's guarantees to users. A change that breaks one of them ne
 2. **Normalize and model:** add a normalizer and a model that inherits `OwlModel`.
 3. **Service:** add a method to `GarminTools` that validates input (`parse_date`, `parse_range`, bounds), uses the cache if the data is cacheable, and returns `.compact()`.
 4. **Register:** add a thin function in `server.py`. Its docstring is the description the model sees, so state limits and units there.
-5. **Declare:** add the tool to the `tools` list in `manifest.json` and to the expected set in `tests/test_server.py`.
+5. **Declare:** add the tool to the `tools` list in `manifest.json` and to the expected set in `tests/test_server.py`. If you created a new module, add it to `PACKAGE_FILES` in `scripts/build-chatgpt-plugin.py`.
 6. **Document:** add a row to the tool tables and, if relevant, the date-limit table in `README.md`.
 
 ### Changing the cache schema
@@ -133,13 +133,36 @@ uv run python -m garmin_owl.diagnostic --find-keys 2026-08-31 temp
 ./scripts/build-extension.sh
 ```
 
-The script checks that all version numbers match, validates `manifest.json` with the pinned `@anthropic-ai/mcpb` packager, and writes `dist/garmin-owl-<version>.mcpb`. `.mcpbignore` controls what goes into the bundle: tests, CI files, and anything token-like are excluded. The first build needs internet access.
+The script checks that all version numbers match, validates `manifest.json` with the pinned `@anthropic-ai/mcpb` packager, and writes `dist/garmin-owl-<version>.mcpb`. `.mcpbignore` controls what goes into the bundle: tests, CI files, the ChatGPT adapter files, local databases, and anything token-like are excluded. The first build needs internet access.
+
+## Building the ChatGPT Desktop plugin
+
+```bash
+uv run --locked python scripts/build-chatgpt-plugin.py
+```
+
+This writes a local marketplace to `dist/chatgpt-marketplace/`. The adapter is three files on top of the normal server:
+
+| File | Role |
+| --- | --- |
+| `plugin.json` | Agent Plugins manifest plus OpenAI UI metadata under `extensions.com.openai` |
+| `mcp.json` | Starts the stdio server via the launcher, with the venv in `${PLUGIN_DATA}/venv` |
+| `scripts/launch-chatgpt.sh` | Finds `uv` without the shell's `PATH` and runs `uv run --locked garmin-owl` |
+
+The script copies only the files in `PACKAGE_FILES` and rejects symlinked inputs, so tokens, caches, and other checkout state can never end up in the plugin. When you add a module under `src/garmin_owl/`, add it to `PACKAGE_FILES` too; `tests/test_chatgpt_plugin.py` fails until you do.
+
+That test file also validates both manifests against the vendored official 1.0.0 schemas in `tests/schemas/`, checks clean staging, exercises the launcher's `uv` discovery, and starts the staged server over stdio without Garmin credentials. The startup test reuses the dev environment and imports the staged source, so it runs offline.
+
+The schemas don't cover OpenAI's UI metadata or the marketplace runtime. When you change the adapter, also install the plugin in ChatGPT Desktop (see the README) and confirm that it appears in **Garmin Owl Local**, installs, and answers a question.
+
+The release workflow doesn't publish a ChatGPT bundle; users build it from their checkout.
 
 ## Releasing
 
-1. Set the new version in all five places:
+1. Set the new version in all six places:
    - `pyproject.toml` → `version`
    - `manifest.json` → `version`
+   - `plugin.json` → `version`
    - `src/garmin_owl/__init__.py` → `__version__`
    - `src/garmin_owl/server.py` → `version=` in `MCPServer(...)`
    - `uv.lock`: run `uv lock` after editing `pyproject.toml`
