@@ -823,3 +823,59 @@ def test_ratings_match_live_and_cached_and_stay_out_of_lists(tmp_path: Path) -> 
     fake.ratings = {"directWorkoutRpe": 80, "directWorkoutFeel": 75}
     refreshed = tools.get_activity(1, refresh=True)["summary"]
     assert (refreshed["perceived_effort"], refreshed["feel"]) == (8, "strong")
+
+
+@pytest.mark.parametrize("response", [{"dateWeightList": []}, {}, {"dateWeightList": [{}]}])
+def test_weigh_in_refresh_reconciles_only_valid_responses(
+    tmp_path: Path, response: dict[str, Any]
+) -> None:
+    from garmin_owl.models import BodyCompositionEntry
+
+    class WeightGarmin(FakeGarmin):
+        def get_weigh_ins(self, startdate: str, enddate: str) -> dict[str, Any]:
+            return response
+
+    database = GarminDatabase(tmp_path / "cache.sqlite")
+    database.put_body_composition(
+        [
+            BodyCompositionEntry(timestamp="2026-01-01T10:00:00", weight_kg=70),
+            BodyCompositionEntry(timestamp="2026-01-02T10:00:00", weight_kg=71),
+        ]
+    )
+    tools = GarminTools(_client(WeightGarmin()), database)
+    if response == {"dateWeightList": []}:
+        assert tools.get_body_composition("2026-01-01", "2026-01-01") == []
+    else:
+        with pytest.raises(ValueError, match="Incomplete"):
+            tools.get_body_composition("2026-01-01", "2026-01-01")
+        assert len(database.get_body_composition("2026-01-01", "2026-01-01")) == 1
+    assert len(database.get_body_composition("2026-01-02", "2026-01-02")) == 1
+
+
+def test_production_client_checks_authenticated_identity_before_cache_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from garmin_owl import client as client_module
+
+    class ProfileGarmin(FakeGarmin):
+        display_name = "stale-sidecar-account"
+        account = "account-a"
+
+        def connectapi(self, path: str, *, timeout: int) -> dict[str, str]:
+            assert path == "/userprofile-service/socialProfile"
+            return {"displayName": self.account}
+
+    api = ProfileGarmin()
+    monkeypatch.setattr(client_module, "load_saved_client", lambda: api)
+    database = GarminDatabase(tmp_path / "cache.sqlite")
+    first = GarminTools(GarminDataClient(), database)
+    assert api.display_name == "account-a"
+    assert first.get_daily_summary("2026-01-01")["steps"] == 1000
+    api.account = "account-b"
+    with pytest.raises(RuntimeError, match="another Garmin account"):
+        GarminTools(GarminDataClient(), database)
+    api.account = "account-a"
+    api.calls.clear()
+    same = GarminTools(GarminDataClient(), database)
+    assert same.get_daily_summary("2026-01-01")["steps"] == 1000
+    assert api.calls == []

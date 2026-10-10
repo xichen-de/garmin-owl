@@ -43,7 +43,7 @@ from .notices import (
     unlabeled_status_notice,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 TODAY_TTL = timedelta(minutes=20)
 # A calendar day keeps changing after midnight: watches and scales upload late, and Garmin
 # recomputes some daily aggregates. Treat a day as settled only at noon the following day, and
@@ -64,6 +64,9 @@ def default_db_path() -> Path:
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS cache_owner (
+  id INTEGER PRIMARY KEY CHECK(id=1), fingerprint TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS daily_metrics (
   date TEXT PRIMARY KEY, steps INTEGER, distance_m REAL, active_calories_kcal REAL,
   total_calories_kcal REAL, resting_hr_bpm INTEGER, min_hr_bpm INTEGER, max_hr_bpm INTEGER,
@@ -304,6 +307,7 @@ class GarminDatabase:
         # dozens of small reads, and reopening SQLite (plus its pragmas) each time dominated them.
         # MCP runs synchronous tools on worker threads, so access is serialized by a lock.
         self._lock = threading.RLock()
+        self._transaction_depth = 0
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -317,12 +321,72 @@ class GarminDatabase:
     def connect(self) -> Iterator[sqlite3.Connection]:
         """Yield the shared connection as one transaction: commit on success, else roll back."""
         with self._lock:
+            outermost = self._transaction_depth == 0
+            self._transaction_depth += 1
             try:
                 yield self._connection
+                if outermost:
+                    self._connection.commit()
             except BaseException:
-                self._connection.rollback()
+                if outermost:
+                    self._connection.rollback()
                 raise
-            self._connection.commit()
+            finally:
+                self._transaction_depth -= 1
+
+    def bind_account(self, fingerprint: str) -> None:
+        """Fail closed for another account or legacy data of unknown ownership."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            owner = connection.execute("SELECT fingerprint FROM cache_owner WHERE id=1").fetchone()
+            if owner is not None:
+                if owner[0] != fingerprint:
+                    raise RuntimeError(
+                        "Cache belongs to another Garmin account. Use a separate GARMIN_OWL_DB."
+                    )
+                return
+            tables = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name != 'cache_owner'"
+            ).fetchall()
+            if any(
+                connection.execute(
+                    'SELECT 1 FROM "' + str(row[0]).replace('"', '""') + '" LIMIT 1'
+                ).fetchone()
+                for row in tables
+            ):
+                raise RuntimeError(
+                    "Cache ownership is unknown. Clear it with garmin-owl-cache-clear "
+                    "or use a new GARMIN_OWL_DB before reading Garmin data."
+                )
+            connection.execute("INSERT INTO cache_owner VALUES(1,?)", (fingerprint,))
+
+    def replace_activities(self, start: str, end: str, items: list[ActivitySummary]) -> None:
+        """Reconcile a complete successful range in one transaction, retaining kept details."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            retained = {item.activity_id for item in items}
+            existing = connection.execute(
+                "SELECT activity_id FROM activities WHERE date BETWEEN ? AND ?", (start, end)
+            ).fetchall()
+            connection.executemany(
+                "DELETE FROM activities WHERE activity_id=?",
+                [(row[0],) for row in existing if row[0] not in retained],
+            )
+            for item in items:
+                self.put_activity_summary(item)
+            self.mark_synced("activities", f"{start}:{end}")
+
+    def replace_body_composition(
+        self, start: str, end: str, items: list[BodyCompositionEntry]
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM body_composition WHERE substr(timestamp,1,10) BETWEEN ? AND ?",
+                (start, end),
+            )
+            self.put_body_composition(items)
+            self.mark_synced("body_composition", f"{start}:{end}")
 
     def initialize(self) -> None:
         with self.connect() as connection:

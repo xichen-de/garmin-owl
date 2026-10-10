@@ -59,6 +59,8 @@ class SyncEngine:
     def __init__(self, client: GarminDataClient, database: GarminDatabase) -> None:
         self.client = client
         self.database = database
+        if client.cache_identity is not None:
+            database.bind_account(client.cache_identity)
 
     def ensure_resource(self, resource: str, cdate: str, *, force: bool = False) -> bool:
         """Ensure one normalized resource exists; return whether Garmin was called."""
@@ -95,15 +97,16 @@ class SyncEngine:
         return True
 
     def ensure_activities(self, start: str, end: str, *, force: bool = False) -> bool:
-        key = f"{start}:{end}"
         if self.database.is_activity_range_fresh(start, end, force=force):
             return False
         # Upstream pages through the whole range before returning, so keep every activity.
         # Truncating here silently dropped the oldest ones from long ranges while the range
         # was still recorded as fully synced.
-        for item in normalize_activities(self.client.activities(start, end)):
-            self.database.put_activity_summary(item)
-        self.database.mark_synced("activities", key)
+        raw = self.client.activities(start, end)
+        items = normalize_activities(raw)
+        if not isinstance(raw, list) or len(items) != len(raw):
+            raise ValueError("Incomplete activity response; cache was not changed")
+        self.database.replace_activities(start, end, items)
         return True
 
     def sync_dates(
