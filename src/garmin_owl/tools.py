@@ -348,13 +348,20 @@ class GarminTools:
     ) -> list[dict[str, Any]]:
         start, end = parse_range(start_date, end_date)
         if self.database is not None:
-            key = f"{start}:{end}"
             if not self.database.is_range_fresh("body_composition", start, end):
-                fetched_entries = normalize_body_composition(
-                    self.client.body_composition(start, end)
-                )
-                self.database.put_body_composition(fetched_entries)
-                self.database.mark_synced("body_composition", key)
+                raw = self.client.body_composition(start, end)
+                if not isinstance(raw, list) and not (
+                    isinstance(raw, dict)
+                    and any(
+                        isinstance(raw.get(key), list)
+                        for key in ("dateWeightList", "dailyWeightSummaries", "weightList")
+                    )
+                ):
+                    raise ValueError("Incomplete weigh-in response; cache was not changed")
+                fetched_entries = normalize_body_composition(raw)
+                if any(item.timestamp is None for item in fetched_entries):
+                    raise ValueError("Incomplete weigh-in response; cache was not changed")
+                self.database.replace_body_composition(start, end, fetched_entries)
             return [item.compact() for item in self.database.get_body_composition(start, end)]
         entries: list[BodyCompositionEntry] = normalize_body_composition(
             self.client.body_composition(start, end)

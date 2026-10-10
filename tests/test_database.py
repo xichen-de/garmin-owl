@@ -392,3 +392,42 @@ def test_activity_ratings_survive_list_reads_and_clear_on_detail_reads(tmp_path:
     cached = database.get_activity(5)
     assert cached is not None
     assert (cached.summary.perceived_effort, cached.summary.feel) == (None, None)
+
+
+def test_account_binding_rejects_other_accounts_and_unknown_legacy_data(tmp_path: Path) -> None:
+    path = tmp_path / "cache.sqlite"
+    database = GarminDatabase(path)
+    database.put_daily(DailySummary(date="2026-01-01", steps=42))
+    with pytest.raises(RuntimeError, match="ownership is unknown"):
+        database.bind_account("account-a")
+    assert database.get_daily("2026-01-01") is not None
+    database.clear()
+    database.bind_account("account-a")
+    database.put_daily(DailySummary(date="2026-01-01", steps=42))
+    database.close()
+    reopened = GarminDatabase(path)
+    reopened.bind_account("account-a")
+    with pytest.raises(RuntimeError, match="another Garmin account"):
+        reopened.bind_account("account-b")
+    assert reopened.get_daily("2026-01-01") is not None
+
+
+def test_range_replacement_rolls_back_deletions_and_partial_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = GarminDatabase(tmp_path / "cache.sqlite")
+    database.put_activity_summary(ActivitySummary(activity_id=1, start_time="2026-01-01"))
+    original = database.put_activity_summary
+
+    def fail_after_write(item: ActivitySummary) -> bool:
+        original(item)
+        raise RuntimeError("simulated write failure")
+
+    monkeypatch.setattr(database, "put_activity_summary", fail_after_write)
+    with pytest.raises(RuntimeError, match="simulated"):
+        database.replace_activities(
+            "2026-01-01", "2026-01-01", [ActivitySummary(activity_id=2, start_time="2026-01-01")]
+        )
+    assert database.get_activity(1) is not None
+    assert database.get_activity(2) is None
+    assert not database.is_activity_range_fresh("2026-01-01", "2026-01-01")

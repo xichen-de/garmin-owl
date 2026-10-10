@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from collections.abc import Callable
 from typing import Any, Protocol
@@ -97,6 +98,21 @@ class GarminDataClient:
     def __init__(self, api: GarminReadAPI | None = None) -> None:
         self.__api: GarminReadAPI = api if api is not None else load_saved_client()
         self.__calls: Counter[str] = Counter()
+        self.cache_identity: str | None = None
+        if api is None:
+            # Resolve identity from the authenticated service, not the cached profile sidecar.
+            profile = _safe_call(
+                lambda: self.__api.connectapi(  # type: ignore[attr-defined]
+                    "/userprofile-service/socialProfile", timeout=8
+                )
+            )
+            identity = profile.get("displayName") if isinstance(profile, dict) else None
+            if not isinstance(identity, str) or not identity.strip():
+                raise GarminOwlAuthError("Cannot establish Garmin account identity for the cache.")
+            # Reads must use the same authenticated profile as the cache binding, even
+            # when the local session sidecar still describes a previous sign-in.
+            self.__api.display_name = identity  # type: ignore[union-attr]
+            self.cache_identity = hashlib.sha256(identity.encode()).hexdigest()
 
     def _read[T](self, endpoint: str, call: Callable[[], T]) -> T:
         self.__calls[endpoint] += 1

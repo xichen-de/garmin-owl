@@ -109,3 +109,40 @@ def test_readiness_refresh_does_not_make_stale_daily_summary_fresh(tmp_path: Pat
     readiness = database.get_readiness(cdate)
     assert daily is not None and daily.steps == 1
     assert readiness is not None and readiness.score == 1
+
+
+def test_refresh_removes_deleted_activities_only_in_requested_range(tmp_path: Path) -> None:
+    from garmin_owl.models import ActivityDetail, ActivitySummary
+
+    database = GarminDatabase(tmp_path / "cache.sqlite")
+    for activity_id, day in [(1, "01"), (2, "02")]:
+        database.put_activity_detail(
+            ActivityDetail(
+                summary=ActivitySummary(
+                    activity_id=activity_id, start_time=f"2026-01-{day}T10:00:00"
+                )
+            )
+        )
+    engine = SyncEngine(GarminDataClient(SyncGarmin()), database)  # type: ignore[arg-type]
+    engine.ensure_activities("2026-01-01", "2026-01-01", force=True)
+    assert database.get_activity(1) is None
+    assert database.get_activity(2) is not None
+    assert database.is_activity_range_fresh("2026-01-01", "2026-01-01")
+
+
+def test_malformed_refresh_preserves_cache(tmp_path: Path) -> None:
+    from garmin_owl.models import ActivitySummary
+
+    class BrokenGarmin(SyncGarmin):
+        def get_activities_by_date(
+            self, startdate: str, enddate: str | None = None
+        ) -> list[dict[str, Any]]:
+            return [{}]
+
+    database = GarminDatabase(tmp_path / "cache.sqlite")
+    database.put_activity_summary(ActivitySummary(activity_id=1, start_time="2026-01-01"))
+    engine = SyncEngine(GarminDataClient(BrokenGarmin()), database)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Incomplete"):
+        engine.ensure_activities("2026-01-01", "2026-01-01", force=True)
+    assert database.get_activity(1) is not None
+    assert not database.is_activity_range_fresh("2026-01-01", "2026-01-01")

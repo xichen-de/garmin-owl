@@ -234,6 +234,15 @@ The cache is stored at:
 - **macOS:** `~/Library/Application Support/garmin-owl/garmin.sqlite`
 - **Ubuntu/Linux:** `~/.local/share/garmin-owl/garmin.sqlite`, or under `$XDG_DATA_HOME` when that is set to an absolute path
 
+The cache is bound to an account fingerprint checked against Garmin at startup. Use a separate
+`GARMIN_OWL_DB` for each Garmin account; opening another account’s cache is rejected. Existing
+caches without an account fingerprint must be explicitly cleared with `garmin-owl-cache-clear`
+before reuse, or preserved by choosing a new database file. Clearing data keeps an existing
+account binding. Account identifiers and credentials are not stored in the cache.
+
+Successful activity and weigh-in range refreshes remove records deleted in Garmin from that
+range. Failed or malformed responses leave the cache unchanged.
+
 Set `GARMIN_OWL_DB` to use a different file. If you used a version before 0.2.1 on Linux, your old cache is at the macOS-style path above. Point `GARMIN_OWL_DB` at it to keep it, or let the new cache fill up by itself.
 
 <details>
