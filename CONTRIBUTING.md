@@ -99,7 +99,7 @@ These are the project's guarantees to users. A change that breaks one of them ne
 1. **Client:** if the tool needs a new Garmin read, add the method to `GarminReadAPI` and a wrapper to `GarminDataClient` that goes through `self._read(...)`.
 2. **Normalize and model:** add a normalizer and a model that inherits `OwlModel`.
 3. **Service:** add a method to `GarminTools` that validates input (`parse_date`, `parse_range`, bounds), uses the cache if the data is cacheable, and returns `.compact()`.
-4. **Register:** add a thin function in `server.py`. Its docstring is the description the model sees: explain when to choose it over related tools, relevant limits, authentication, and cache behavior. Add `Annotated`/`Field` descriptions for every parameter and the shared read-only tool annotations. `tests/test_server.py` checks the exported MCP metadata without authenticating.
+4. **Register:** add a thin function in `server.py`. Its docstring is the description the model sees: explain when to choose it over related tools, relevant limits, authentication, and cache behavior. Add `Annotated`/`Field` descriptions for every parameter and the shared read-only tool annotations. `tests/test_server.py` checks the exported MCP metadata without authenticating. Declare outputs as `Annotated[CallToolResult, YourModel]`; list results get an envelope model with `count` (and `truncated` when capped), like `ActivityList`, and return `_tool_result(...)` so the SDK validates against the model without restoring omitted fields as null. Reuse the models in `models.py`; keep missing metrics optional.
 5. **Declare:** add the tool to the `tools` list in `manifest.json` and to the expected set in `tests/test_server.py`. If you created a new module, add it to `PACKAGE_FILES` in `scripts/build-chatgpt-plugin.py`.
 6. **Document:** add a row to the tool tables and, if relevant, the date-limit table in `README.md`.
 
@@ -108,8 +108,10 @@ These are the project's guarantees to users. A change that breaks one of them ne
 The schema lives in `database.py`.
 
 - Add a new column both to the `CREATE TABLE` statement in `SCHEMA` (for new caches) and to `ADDED_COLUMNS` (so existing caches gain it through `ALTER TABLE` on startup).
-- If rows cached by older versions would now be incomplete, bump `SCHEMA_VERSION` and add a migration step in `initialize()` that marks those rows stale, like the `version < 5` step does, instead of deleting user data.
-- A cache written by a newer version is refused with "Unsupported garmin-owl cache schema", so never lower `SCHEMA_VERSION`.
+- If rows cached by older versions would now be incomplete or change meaning (including a changed value format), bump `SCHEMA_VERSION` and add a step to `_migrate()` that marks those rows stale, like the `version < 5` and `version < 8` steps do. When a value can be corrected exactly (a unit or rounding fix), correct it in place, as the `version < 9` step does.
+- The stored version is checked when the cache opens and again at the start of every transaction. An older file is migrated in place. A file written by a newer version is renamed to `garmin.sqlite.schema-N` and replaced, so never lower `SCHEMA_VERSION`.
+- Cached single-row reads go through `_discard_unreadable`: a row that no longer fits its model is deleted and re-fetched instead of failing.
+- Timestamps are produced only by `normalize.local_iso()`, which returns ISO 8601 with an explicit offset built from Garmin's GMT value. Never emit raw `*Local` values.
 
 Freshness rules: a day is settled at `DAY_SETTLES_AT`, noon the next day. A row fetched after that is kept for good, and a row fetched before it is reused for `TODAY_TTL`, 20 minutes. Keep new cached resources on the same rule by going through `is_fresh` / `is_range_fresh`.
 

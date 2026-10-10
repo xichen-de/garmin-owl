@@ -177,7 +177,7 @@ Your assistant chooses among 19 read-only tools. None of them can change anythin
 | --- | --- |
 | `get_body_composition` | Weight and related measurements over up to 366 days (defaults to the last 30) |
 | `get_recovery` | Sleep, HRV, Body Battery, stress, RHR, and readiness for one day |
-| `get_recovery_trend` | Sleep score, sleep HR, skin-temperature deviation, HRV, RHR, readiness, and Body Battery over the last 7, 14, or 28 days |
+| `get_recovery_trend` | Sleep score, sleep HR, skin-temperature deviation, HRV, RHR, readiness, and Body Battery over the last 1-28 days |
 | `get_training_context` | One day's recovery plus the 7 days of training before it |
 
 ### Dates and range limits
@@ -189,18 +189,25 @@ You can ask about any past date. The only limit on history is how much Garmin st
 | One day (any date) | The "one day at a time" tools, `get_recovery`, `get_training_load` |
 | Up to 366 days | `get_activities`, `get_body_composition` |
 | Up to 90 days | `get_recent_activities` (ending today), `get_running_tolerance` (ending on any date) |
-| Fixed window | `get_recovery_trend`: last 7, 14, or 28 days, ending today<br>`get_training_context`: the 7 days ending on the chosen date<br>`get_training_week`: the Mon–Sun week containing the chosen date |
+| Fixed window | `get_recovery_trend`: last 1-28 days, ending today<br>`get_training_context`: the 7 days ending on the chosen date<br>`get_training_week`: the Mon–Sun week containing the chosen date |
 
-`get_activity` and `compare_activities` take activity IDs, not dates, and `get_training_zones` reads your current settings. Activity lists return at most 100 activities per request.
+`get_activity` and `compare_activities` take activity IDs, not dates, and `get_training_zones` reads your current settings. Activity lists return at most 100 activities per request; their `truncated` flag says when more matched.
 
 You don't need to know these limits: describe the period in plain language and Claude picks the dates. For longer periods, such as several years of activities, Claude can split the question into several requests. A request that is too long returns an error that states the limit.
+
+Every timestamp (sleep start/end, readiness, activity and lap starts, weigh-ins, time-series
+readings) is ISO 8601 with an explicit UTC offset, such as `2026-10-09T23:18:16+02:00`. It is
+built from Garmin's true GMT value. The offset is the one Garmin recorded for your device at that
+moment, or your computer's time zone when Garmin gives only UTC, so daylight-saving changes are
+handled per timestamp. Dates (`YYYY-MM-DD`) are Garmin calendar days.
 
 ### How to read the answers
 
 - **Garmin's numbers and `garmin-owl`'s calculations are kept apart.** Anything calculated (such as "12% above your recent average") states its baseline dates, how many days it used, and its formula.
-- **Missing stays missing.** Nothing is guessed, and an absent value is never counted as zero.
+- **Missing stays missing.** Nothing is guessed, and an absent value is never counted as zero. Garmin's `0.0` for something an activity didn't measure (an indoor workout's distance, a ride without a power meter) is left out too.
 - **Totals say how complete they are**, for example "distance covers 3 of 4 activities".
-- **Gaps are explained** in an `availability` list: Garmin had no data, the metric is unsupported on your device, or the read failed or was rate-limited.
+- **Gaps are explained** in an `availability` list: Garmin had no data, the metric is unsupported on your device, or the read failed or was rate-limited. This includes a day with no data at all for sleep, HRV, readiness, stress, or Body Battery.
+- **Units are in the field name** (`_m`, `_seconds`, `_hours`, `_percent`). Recovery time is in hours everywhere, and time series are always called `timeseries`.
 - `get_cycle` deliberately leaves out notes, symptoms, moods, sexual activity, and raw daily logs.
 
 ### Your own training notes
@@ -281,12 +288,19 @@ uv run garmin-owl-smoke
 | --- | --- | --- |
 | "No local Garmin tokens found" | Not signed in yet, or `~/.garminconnect` was deleted | Run `uv run garmin-owl-auth` |
 | "authentication expired or was rejected" | Garmin ended the session, for example after a password change | Run `uv run garmin-owl-auth` again |
-| "rate limit reached" | Too many Garmin requests in a short time | Wait a few minutes. Sync smaller ranges. |
-| "Garmin Connect is unavailable" | A network problem or Garmin outage | Try again later |
-| "unexpected response shape" | Garmin changed a private endpoint | [Open an issue](https://github.com/xichen-de/garmin-owl/issues) naming the tool (never paste your Garmin data) |
+| "rate limit reached (HTTP 429)" | Too many Garmin requests in a short time | Wait a few minutes. Sync smaller ranges. |
+| "Could not reach Garmin Connect" | A network problem or timeout | Check the connection, then try again later |
+| "server error (HTTP 5xx)" | Garmin Connect itself is failing | Try again later |
+| "rejected this request as invalid or too large (HTTP 4xx)" | Garmin refused this exact request | Ask for a shorter period; retrying unchanged won't help |
+| "unexpected response shape" / "unusable response" | Garmin changed a private endpoint | [Open an issue](https://github.com/xichen-de/garmin-owl/issues) naming the tool (never paste your Garmin data) |
 | "no data for this request" | That metric isn't recorded for that date or device | Expected for unsupported metrics |
 | "date range cannot exceed" / "days must be between" | The request was longer than the tool allows | Ask for a shorter period, or several periods |
-| "Unsupported garmin-owl cache schema" | The cache was created by a newer version | Update `garmin-owl`, or run `uv run garmin-owl-cache-clear` |
+| "Cache belongs to another Garmin account" | The cache was created while signed in to a different account | Use a separate `GARMIN_OWL_DB` for each account |
+| "upgraded … by a newer garmin-owl" | A newer version changed the cache while this one was running | Restart the app |
+| "local garmin-owl cache could not be read or written" | SQLite error, often another process holding the file | Close other garmin-owl processes; if it persists, run `uv run garmin-owl-cache-clear` |
+| "unexpected internal error (…)" | A bug; details are withheld to protect your data | Retry once, then restart and report the tool name and error type |
+
+The cache repairs itself after updates. Rows stored in an older format are re-read from Garmin, rows cached before account binding existed are discarded and re-read, and a cache written by a newer version is renamed to `garmin.sqlite.schema-N` and replaced with a fresh one.
 
 - **Extension doesn't appear:** make sure you installed a `.mcpb` from Releases (or one built from the same version as your checkout), then restart Claude Desktop.
 - **Tools time out the first time:** run `uv run garmin-owl-sync` once to warm the cache.

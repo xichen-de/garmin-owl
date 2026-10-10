@@ -148,7 +148,7 @@ def test_hrv_decimation_and_baseline() -> None:
     result = normalize_hrv(raw, DATE, include_timeseries=True).compact()
     assert result["status"] == "BALANCED"
     assert result["baseline_low_ms"] == 45
-    assert len(result["readings"]) <= MAX_TIMESERIES_POINTS
+    assert len(result["timeseries"]) <= MAX_TIMESERIES_POINTS
 
 
 def test_training_readiness_prefers_morning_snapshot() -> None:
@@ -167,7 +167,7 @@ def test_training_readiness_prefers_morning_snapshot() -> None:
         DATE,
     ).compact()
     assert result["score"] == 66
-    assert result["recovery_time_minutes"] == 180
+    assert result["recovery_time_hours"] == 3.0
     assert result["acute_load_factor_percent"] == 74
     assert result["acute_load_factor_feedback"] == "OPTIMAL"
 
@@ -255,7 +255,7 @@ def test_activity_list_enriches_walking_cardio_and_cycling_metrics() -> None:
                 "activityType": {"typeKey": "walking"},
                 "movingDuration": 900,
                 "averageMovingSpeed": 1.4,
-                "avgStrideLength": 0.72,
+                "avgStrideLength": 72.0,
                 "steps": 1500,
                 "recoveryHeartRate": 88,
                 "hrTimeInZone_2": 420,
@@ -587,3 +587,60 @@ def test_missing_or_off_scale_ratings_are_absent(rpe: Any, feel: Any) -> None:
 def test_activity_list_never_shows_ratings() -> None:
     summary = normalize_activity({"activityId": 1, "directWorkoutRpe": 70})
     assert summary.listing().compact() == {"activity_id": 1}
+
+
+def test_stride_length_converts_garmins_centimetres_to_metres() -> None:
+    # Activity 24635645934: 729.5 m over 1030 steps is about 0.71 m per step.
+    walk = normalize_activity(
+        {"activityId": 1, "avgStrideLength": 72.606, "distance": 729.5, "steps": 1030}
+    )
+    assert walk.average_stride_length_m == 0.726
+    assert walk.distance_m is not None and walk.steps is not None
+    assert abs(walk.distance_m / walk.steps - walk.average_stride_length_m) < 0.03
+
+
+def test_unmeasured_activity_metrics_are_absent_not_zero() -> None:
+    indoor = normalize_activity(
+        {
+            "activityId": 1,
+            "activityType": {"typeKey": "indoor_cardio"},
+            "duration": 1800.0,
+            "distance": 0.0,
+            "averageSpeed": 0.0,
+            "movingDuration": 0.0,
+            "averageMovingSpeed": 0.0,
+            "avgPower": 0,
+            "avgStrideLength": 0.0,
+        }
+    ).compact()
+    for field in (
+        "distance_m",
+        "average_speed_mps",
+        "moving_duration_seconds",
+        "average_moving_speed_mps",
+        "average_power_w",
+        "average_stride_length_m",
+    ):
+        assert field not in indoor, field
+    assert indoor["duration_seconds"] == 1800.0
+
+
+def test_float32_noise_and_negative_zero_are_not_reported() -> None:
+    activity = normalize_activity(
+        {
+            "activityId": 1,
+            "avgRespirationRate": 26.940000534057617,
+            "minRespirationRate": 19.899999618530273,
+        }
+    )
+    assert (activity.average_respiration, activity.lowest_respiration) == (26.9, 19.9)
+    sleep = normalize_sleep(
+        {
+            "dailySleepDTO": {"averageRespirationValue": 15.960000038146973},
+            "avgSkinTempDeviationC": -0.001,
+        },
+        DATE,
+    )
+    assert sleep.average_respiration == 16.0
+    assert sleep.compact()["skin_temperature_deviation_c"] == 0.0
+    assert str(sleep.compact()["skin_temperature_deviation_c"]) == "0.0"

@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "garmin-owl",
   "display_name": "Garmin Owl",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Local-only, read-only access to your Garmin Connect health and activity data.",
   "long_description": "Garmin Owl runs entirely as a local stdio MCP server. It reads your existing Garmin Connect data on demand through the unofficial python-garminconnect client. It has no write tools, public listener, telemetry, analytics, remote database, or bundled credentials. Garmin session tokens remain in the standard local ~/.garminconnect store.",
   "author": {
@@ -25,15 +25,15 @@
   "tools": [
     {
       "name": "get_daily_summary",
-      "description": "Read a concise Garmin daily summary."
+      "description": "Read one day's steps, calories, intensity minutes, heart rate, stress, respiration, SpO2, and whole-day Body Battery totals."
     },
     {
       "name": "get_sleep",
-      "description": "Read Garmin-recorded sleep metrics."
+      "description": "Read Garmin-recorded sleep metrics; start/end times are ISO 8601 with an explicit UTC offset."
     },
     {
       "name": "get_hrv",
-      "description": "Read Garmin HRV status and nightly values."
+      "description": "Read one night's Garmin HRV status, averages, and baseline, plus an optional capped time series."
     },
     {
       "name": "get_recovery",
@@ -45,15 +45,15 @@
     },
     {
       "name": "get_body_battery",
-      "description": "Read Garmin Body Battery charged/drained and levels, plus an optional capped time series."
+      "description": "Read one day's whole-day Body Battery charged/drained and levels, plus an optional capped time series."
     },
     {
       "name": "get_stress",
-      "description": "Read Garmin average/max stress and per-band durations, plus an optional capped time series."
+      "description": "Read one day's Garmin average/max stress and per-band durations, plus an optional capped time series."
     },
     {
       "name": "get_activities",
-      "description": "Read a concise list of Garmin activities in a date range of up to 366 days, defaulting to the last 14 days."
+      "description": "Read Garmin activities in a date range of up to 366 days (default: last 14), with a count and truncation flag."
     },
     {
       "name": "get_activity",
@@ -61,7 +61,7 @@
     },
     {
       "name": "get_body_composition",
-      "description": "Read Garmin weight and body-composition data."
+      "description": "Read Garmin weight and body-composition measurements for up to 366 days, with a count."
     },
     {
       "name": "get_training_context",
@@ -69,7 +69,7 @@
     },
     {
       "name": "get_recovery_trend",
-      "description": "Trend sleep, HRV (nightly and weekly), resting HR, readiness, and Body Battery across 7, 14, or 28 preceding Garmin days."
+      "description": "Trend sleep, HRV (nightly and weekly), resting HR, readiness, and Body Battery across 1-28 Garmin days ending today."
     },
     {
       "name": "get_training_week",
@@ -77,7 +77,7 @@
     },
     {
       "name": "get_training_load",
-      "description": "Read Garmin training load/status aggregates, naming any source Garmin had no data for."
+      "description": "Read Garmin training load/status, load focus, VO2 max, and endurance/hill scores, naming any source Garmin had no data for."
     },
     {
       "name": "get_training_zones",
@@ -89,7 +89,7 @@
     },
     {
       "name": "get_recent_activities",
-      "description": "Read bounded, optionally type-filtered recent activities."
+      "description": "Read bounded, optionally type-filtered recent activities, with a count and truncation flag."
     },
     {
       "name": "compare_activities",

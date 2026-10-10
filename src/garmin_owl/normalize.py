@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from datetime import date as date_value
 from typing import Any
 
@@ -72,7 +72,25 @@ def _number(value: Any) -> float | None:
 
 def _rounded(value: Any, digits: int) -> float | None:
     number = _number(value)
-    return round(number, digits) if number is not None else None
+    # Adding 0.0 turns a rounded -0.0 into 0.0.
+    return round(number, digits) + 0.0 if number is not None else None
+
+
+def hours_from_minutes(value: Any) -> float | None:
+    minutes = _number(value)
+    return round(minutes / 60, 1) + 0.0 if minutes is not None else None
+
+
+def _measured(value: Any, digits: int | None = None) -> float | None:
+    """A quantity that is never truly zero when recorded, such as distance, speed, or power.
+
+    Garmin reports 0.0 for metrics an activity did not measure (an indoor workout's distance,
+    a ride without a power meter); that is absence, not a measured zero.
+    """
+    number = _number(value)
+    if number is None or number <= 0:
+        return None
+    return round(number, digits) if digits is not None else number
 
 
 def _integer(value: Any) -> int | None:
@@ -107,16 +125,66 @@ def _nested(data: Mapping[str, Any], *path: str) -> Mapping[str, Any]:
     return _map(current)
 
 
-def _epoch_to_iso(value: Any) -> str | int:
-    number = _number(value)
-    if number is None:
-        return str(value)
-    # Garmin time-series timestamps are generally epoch milliseconds.
-    seconds = number / 1000 if number > 10_000_000_000 else number
+# A UTC offset is a whole number of quarter hours within +/-14 hours; Garmin's Local and GMT
+# values that disagree by anything else are not a usable pair.
+_MAX_UTC_OFFSET = timedelta(hours=14)
+_OFFSET_STEP = timedelta(minutes=15)
+
+
+def _clock(value: Any) -> datetime | None:
+    """Parse a Garmin clock reading: epoch seconds/milliseconds or an ISO-like string.
+
+    The result is naive unless the source carried its own offset: whether it is UTC or local
+    wall time depends on which Garmin field it came from (``*GMT`` or ``*Local``).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    number: float | None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text.lstrip("-").isdigit():
+            try:
+                # Accepts Garmin's "2026-10-10T05:00:29.0" and "2026-10-10 07:30:00" forms.
+                return datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        number = float(text)
+    else:
+        number = _number(value)
+        if number is None:
+            return None
+    seconds = number / 1000 if abs(number) > 10_000_000_000 else number
     try:
-        return datetime.fromtimestamp(seconds, tz=UTC).isoformat().replace("+00:00", "Z")
+        return datetime.fromtimestamp(seconds, tz=UTC).replace(tzinfo=None)
     except (OSError, OverflowError, ValueError):
-        return int(number)
+        return None
+
+
+def local_iso(gmt: Any = None, local: Any = None) -> str | None:
+    """Render a Garmin instant as ISO 8601 with an explicit UTC offset.
+
+    Garmin encodes local wall-clock time as if it were UTC (``*TimestampLocal`` epochs and
+    ``*Local`` strings), so reading such a value as UTC shifts it by the user's offset. The
+    instant always comes from the true ``GMT`` value. Its offset is the one Garmin recorded for
+    the device at that moment (Local minus GMT), which keeps the wall time identical to Garmin
+    Connect even while travelling; without a usable Local value it is this computer's time zone
+    for that instant, so DST transitions are handled per timestamp. A Local value alone is read
+    as wall time in this computer's time zone.
+    """
+    instant, wall = _clock(gmt), _clock(local)
+    if instant is not None and instant.tzinfo is None:
+        utc_instant = instant.replace(tzinfo=UTC)
+        if wall is not None and wall.tzinfo is None:
+            offset = wall - instant
+            if abs(offset) <= _MAX_UTC_OFFSET and offset % _OFFSET_STEP == timedelta(0):
+                return utc_instant.astimezone(timezone(offset)).isoformat(timespec="seconds")
+        return utc_instant.astimezone().isoformat(timespec="seconds")
+    if instant is not None:
+        return instant.isoformat(timespec="seconds")
+    if wall is not None:
+        # A naive datetime's astimezone() interprets it as this computer's local time.
+        return wall.astimezone().isoformat(timespec="seconds")
+    return None
 
 
 def decimate_points(points: Sequence[Any], cap: int = MAX_TIMESERIES_POINTS) -> list[Any]:
@@ -133,16 +201,22 @@ def decimate_points(points: Sequence[Any], cap: int = MAX_TIMESERIES_POINTS) -> 
 def _points(raw: Any, cap: int | None = MAX_TIMESERIES_POINTS) -> list[TimePoint]:
     parsed: list[TimePoint] = []
     for item in _list(raw):
+        local: Any = None
         if isinstance(item, list | tuple) and len(item) >= 2:
+            # Garmin's value arrays carry true UTC epoch milliseconds.
             timestamp, value = item[0], item[1]
         elif isinstance(item, Mapping):
-            timestamp = _first(item, "timestamp", "startGMT", "startTimeGMT", "calendarDate")
+            timestamp = _first(item, "timestamp", "startGMT", "startTimeGMT", "readingTimeGMT")
+            local = _first(item, "readingTimeLocal", "startTimeLocal", "startLocal")
+            if timestamp is None and local is None:
+                timestamp = item.get("calendarDate")
             value = _first(item, "value", "bodyBattery", "stressLevel", "hrvValue")
         else:
             continue
         number = _number(value)
-        if timestamp is not None and number is not None and number >= 0:
-            parsed.append(TimePoint(timestamp=_epoch_to_iso(timestamp), value=number))
+        rendered = local_iso(timestamp, local) or _text(timestamp)
+        if rendered is not None and number is not None and number >= 0:
+            parsed.append(TimePoint(timestamp=rendered, value=number))
     return decimate_points(parsed, cap) if cap is not None else parsed
 
 
@@ -184,11 +258,11 @@ def normalize_daily_summary(raw: Any, date: str) -> DailySummary:
         last_seven_days_avg_resting_hr_bpm=_integer(data.get("lastSevenDaysAvgRestingHeartRate")),
         body_battery_during_sleep=_integer(data.get("bodyBatteryDuringSleep")),
         body_battery_at_wake=_integer(data.get("bodyBatteryAtWakeTime")),
-        average_waking_respiration=_number(data.get("avgWakingRespirationValue")),
-        highest_respiration=_number(data.get("highestRespirationValue")),
-        lowest_respiration=_number(data.get("lowestRespirationValue")),
-        average_spo2_percent=_number(data.get("averageSpo2")),
-        lowest_spo2_percent=_number(data.get("lowestSpo2")),
+        average_waking_respiration=_rounded(data.get("avgWakingRespirationValue"), 1),
+        highest_respiration=_rounded(data.get("highestRespirationValue"), 1),
+        lowest_respiration=_rounded(data.get("lowestRespirationValue"), 1),
+        average_spo2_percent=_rounded(data.get("averageSpo2"), 1),
+        lowest_spo2_percent=_rounded(data.get("lowestSpo2"), 1),
     )
 
 
@@ -211,21 +285,25 @@ def normalize_sleep(raw: Any, date: str) -> SleepSummary:
         light_sleep_seconds=_integer(_first(data, "lightSleepSeconds", "lightSleepDuration")),
         rem_sleep_seconds=_integer(_first(data, "remSleepSeconds", "remSleepDuration")),
         awake_seconds=_integer(_first(data, "awakeSleepSeconds", "awakeTimeSeconds")),
-        sleep_start=_text(
-            _first(
-                data, "sleepStartTimestampLocal", "sleepStartTimestampGMT", "sleepStartTimeLocal"
-            )
+        sleep_start=local_iso(
+            data.get("sleepStartTimestampGMT"),
+            _first(data, "sleepStartTimestampLocal", "sleepStartTimeLocal"),
         ),
-        sleep_end=_text(
-            _first(data, "sleepEndTimestampLocal", "sleepEndTimestampGMT", "sleepEndTimeLocal")
+        sleep_end=local_iso(
+            data.get("sleepEndTimestampGMT"),
+            _first(data, "sleepEndTimestampLocal", "sleepEndTimeLocal"),
         ),
-        average_respiration=_number(_first(data, "averageRespirationValue", "averageRespiration")),
-        lowest_respiration=_number(_first(data, "lowestRespirationValue", "lowestRespiration")),
-        highest_respiration=_number(_first(data, "highestRespirationValue", "highestRespiration")),
-        average_spo2_percent=_number(_first(data, "averageSpO2Value", "averageSpo2")),
-        lowest_spo2_percent=_number(_first(data, "lowestSpO2Value", "lowestSpo2")),
-        average_hr_bpm=_number(_first(data, "avgHeartRate", "averageHeartRate")),
-        average_stress=_number(_first(data, "avgSleepStress", "averageSleepStress")),
+        average_respiration=_rounded(
+            _first(data, "averageRespirationValue", "averageRespiration"), 1
+        ),
+        lowest_respiration=_rounded(_first(data, "lowestRespirationValue", "lowestRespiration"), 1),
+        highest_respiration=_rounded(
+            _first(data, "highestRespirationValue", "highestRespiration"), 1
+        ),
+        average_spo2_percent=_rounded(_first(data, "averageSpO2Value", "averageSpo2"), 1),
+        lowest_spo2_percent=_rounded(_first(data, "lowestSpO2Value", "lowestSpo2"), 1),
+        average_hr_bpm=_rounded(_first(data, "avgHeartRate", "averageHeartRate"), 1),
+        average_stress=_rounded(_first(data, "avgSleepStress", "averageSleepStress"), 1),
         nap_seconds=_integer(_first(data, "napTimeSeconds", "napSeconds")),
         awake_count=_integer(data.get("awakeCount")),
         restless_moments_count=_integer(
@@ -262,7 +340,7 @@ def normalize_hrv(raw: Any, date: str, *, include_timeseries: bool = False) -> H
         last_night_average_ms=_number(_first(summary, "lastNightAvg", "lastNightAverage")),
         baseline_low_ms=_number(_first(baseline, "lowUpper", "balancedLow", "low")),
         baseline_high_ms=_number(_first(baseline, "balancedUpper", "balancedHigh", "high")),
-        readings=readings or None,
+        timeseries=readings or None,
     )
 
 
@@ -281,7 +359,8 @@ def normalize_training_readiness(raw: Any, date: str) -> TrainingReadiness:
         score=_integer(data.get("score")),
         level=_text(_first(data, "scoreFeedback", "level", "rating")),
         feedback=_text(_first(data, "feedbackLong", "feedbackShort", "feedback")),
-        timestamp=_text(_first(data, "timestampLocal", "timestamp")),
+        # Garmin's readiness ``timestamp`` is GMT without a zone marker.
+        timestamp=local_iso(data.get("timestamp"), data.get("timestampLocal")),
         sleep_score=_integer(data.get("sleepScore")),
         hrv_factor_percent=_number(_first(data, "hrvFactorPercent", "hrvFactor")),
         acute_load_factor_percent=_number(
@@ -298,7 +377,7 @@ def normalize_training_readiness(raw: Any, date: str) -> TrainingReadiness:
         stress_history_factor_percent=_number(
             _first(data, "stressHistoryFactorPercent", "stressHistoryFactor")
         ),
-        recovery_time_minutes=_integer(_first(data, "recoveryTime", "recoveryTimeMinutes")),
+        recovery_time_hours=hours_from_minutes(_first(data, "recoveryTime", "recoveryTimeMinutes")),
         hrv_factor_feedback=_text(data.get("hrvFactorFeedback")),
         acute_load_factor_feedback=_text(data.get("acwrFactorFeedback")),
         sleep_history_factor_feedback=_text(data.get("sleepHistoryFactorFeedback")),
@@ -375,17 +454,19 @@ def normalize_activity(raw: Any) -> ActivitySummary:
     return ActivitySummary(
         activity_id=activity_id,
         name=_text(_first(data, "activityName", "name")),
-        start_time=_text(_first(data, "startTimeLocal", "startTimeGMT", "beginTimestamp")),
+        start_time=local_iso(
+            _first(data, "startTimeGMT", "beginTimestamp"), data.get("startTimeLocal")
+        ),
         activity_type=_activity_type(data),
         duration_seconds=_rounded(_first(data, "duration", "durationSeconds"), 2),
         elapsed_seconds=_rounded(_first(data, "elapsedDuration", "elapsedDurationSeconds"), 2),
-        distance_m=_rounded(_first(data, "distance", "distanceMeters"), 1),
+        distance_m=_measured(_first(data, "distance", "distanceMeters"), 1),
         calories_kcal=_number(_first(data, "calories", "caloriesKcal")),
-        average_hr_bpm=_number(_first(data, "averageHR", "averageHeartRate")),
-        max_hr_bpm=_number(_first(data, "maxHR", "maxHeartRate")),
-        average_speed_mps=_rounded(_first(data, "averageSpeed", "averageSpeedMetersPerSecond"), 3),
+        average_hr_bpm=_rounded(_first(data, "averageHR", "averageHeartRate"), 1),
+        max_hr_bpm=_rounded(_first(data, "maxHR", "maxHeartRate"), 1),
+        average_speed_mps=_measured(_first(data, "averageSpeed", "averageSpeedMetersPerSecond"), 3),
         elevation_gain_m=_rounded(_first(data, "elevationGain", "gainElevation"), 1),
-        average_cadence=_number(
+        average_cadence=_measured(
             _first(
                 data,
                 "averageRunningCadenceInStepsPerMinute",
@@ -394,21 +475,28 @@ def normalize_activity(raw: Any) -> ActivitySummary:
                 "averageCadence",
             )
         ),
-        average_power_w=_number(_first(data, "avgPower", "averagePower")),
-        moving_duration_seconds=_rounded(
+        average_power_w=_measured(_first(data, "avgPower", "averagePower")),
+        moving_duration_seconds=_measured(
             _first(data, "movingDuration", "movingDurationSeconds"), 2
         ),
-        average_moving_speed_mps=_rounded(data.get("averageMovingSpeed"), 3),
+        average_moving_speed_mps=_measured(data.get("averageMovingSpeed"), 3),
         elevation_loss_m=_rounded(data.get("elevationLoss"), 1),
-        average_stride_length_m=_rounded(_first(data, "avgStrideLength", "averageStrideLength"), 3),
+        # Garmin reports stride length in centimetres despite the unitless key.
+        average_stride_length_m=_measured(
+            (_number(_first(data, "avgStrideLength", "averageStrideLength")) or 0) / 100, 3
+        ),
         steps=_integer(data.get("steps")),
         recovery_hr_bpm=_integer(_first(data, "recoveryHeartRate", "recoveryHR")),
-        average_respiration=_number(_first(data, "avgRespirationRate", "averageRespirationRate")),
-        lowest_respiration=_number(_first(data, "minRespirationRate", "lowestRespirationRate")),
-        highest_respiration=_number(_first(data, "maxRespirationRate", "highestRespirationRate")),
-        max_cadence=_number(_first(data, "maxRunCadence", "maxBikeCadence", "maxCadence")),
-        max_power_w=_number(_first(data, "maxPower", "maximumPower")),
-        normalized_power_w=_number(_first(data, "normPower", "normalizedPower")),
+        average_respiration=_rounded(
+            _first(data, "avgRespirationRate", "averageRespirationRate"), 1
+        ),
+        lowest_respiration=_rounded(_first(data, "minRespirationRate", "lowestRespirationRate"), 1),
+        highest_respiration=_rounded(
+            _first(data, "maxRespirationRate", "highestRespirationRate"), 1
+        ),
+        max_cadence=_measured(_first(data, "maxRunCadence", "maxBikeCadence", "maxCadence")),
+        max_power_w=_measured(_first(data, "maxPower", "maximumPower")),
+        normalized_power_w=_measured(_first(data, "normPower", "normalizedPower")),
         training_stress_score=_number(data.get("trainingStressScore")),
         intensity_factor=_number(data.get("intensityFactor")),
         activity_training_load=_rounded(data.get("activityTrainingLoad"), 1),
@@ -491,13 +579,13 @@ def normalize_activity_detail(
     laps = [
         ActivityLap(
             lap_index=_integer(_first(item_map, "lapIndex", "lapNumber", "messageIndex")),
-            start_time=_text(_first(item_map, "startTimeLocal", "startTimeGMT")),
+            start_time=local_iso(item_map.get("startTimeGMT"), item_map.get("startTimeLocal")),
             duration_seconds=_rounded(_first(item_map, "duration", "durationSeconds"), 2),
-            distance_m=_rounded(_first(item_map, "distance", "distanceMeters"), 1),
-            average_hr_bpm=_number(_first(item_map, "averageHR", "averageHeartRate")),
-            max_hr_bpm=_number(_first(item_map, "maxHR", "maxHeartRate")),
-            average_cadence=_number(_first(item_map, "averageCadence", "avgCadence")),
-            average_power_w=_number(_first(item_map, "avgPower", "averagePower")),
+            distance_m=_measured(_first(item_map, "distance", "distanceMeters"), 1),
+            average_hr_bpm=_rounded(_first(item_map, "averageHR", "averageHeartRate"), 1),
+            max_hr_bpm=_rounded(_first(item_map, "maxHR", "maxHeartRate"), 1),
+            average_cadence=_measured(_first(item_map, "averageCadence", "avgCadence")),
+            average_power_w=_measured(_first(item_map, "avgPower", "averagePower")),
         )
         for item_map in (_map(item) for item in lap_items[:MAX_ACTIVITY_LAPS])
     ]
@@ -767,9 +855,9 @@ def normalize_sleep_range(raw: Any) -> dict[str, SleepSummary]:
             light_sleep_seconds=_integer(data.get("lightTime")),
             rem_sleep_seconds=_integer(data.get("remTime")),
             awake_seconds=_integer(data.get("awakeTime")),
-            average_respiration=_number(data.get("respiration")),
-            average_spo2_percent=_number(data.get("spO2")),
-            average_hr_bpm=_number(data.get("avgHeartRate")),
+            average_respiration=_rounded(data.get("respiration"), 1),
+            average_spo2_percent=_rounded(data.get("spO2"), 1),
+            average_hr_bpm=_rounded(data.get("avgHeartRate"), 1),
             sleep_need_minutes=_integer(data.get("sleepNeed")),
             sleep_alignment_status=_text(data.get("sleepAlignmentStatus")),
             # Verified against avgSkinTempDeviationC from the single-night response.
@@ -872,21 +960,16 @@ def normalize_cycle(raw_day: Any, raw_calendar: Any, date: str) -> CycleSummary:
 
 
 def _weigh_in_timestamp(data: Mapping[str, Any]) -> str | None:
-    """Return an ISO local timestamp whose first ten characters are the weigh-in's date.
+    """Return an ISO timestamp with offset whose first ten characters are the weigh-in's date.
 
-    Garmin's weight range read reports ``date`` as epoch milliseconds of local wall time.  Kept
-    as digits it could neither be read as a time nor matched by the cache's date filter, so a
-    cached weigh-in was never returned.
+    Garmin's weight range read reports ``date`` as epoch milliseconds of local wall time and
+    ``timestampGMT`` as the true instant. The date prefix is what the cache filters on.
     """
-    value = _first(data, "timestampLocal", "date", "calendarDate", "summaryDate")
-    number = _number(value) if not isinstance(value, str) else None
-    if number is None:
-        return _text(value)
-    seconds = number / 1000 if number > 10_000_000_000 else number
-    try:
-        return datetime.fromtimestamp(seconds, tz=UTC).replace(tzinfo=None).isoformat()
-    except (OSError, OverflowError, ValueError):
-        return _text(_first(data, "calendarDate", "summaryDate"))
+    local = _first(data, "timestampLocal", "date")
+    rendered = local_iso(data.get("timestampGMT"), local)
+    if rendered is not None:
+        return rendered
+    return _text(_first(data, "calendarDate", "summaryDate"))
 
 
 def _weigh_ins(items: Any) -> list[Mapping[str, Any]]:

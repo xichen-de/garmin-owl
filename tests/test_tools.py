@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from garminconnect import GarminConnectConnectionError, GarminConnectNotFoundError
+from garminconnect import (
+    GarminConnectConnectionError,
+    GarminConnectNotFoundError,
+    GarminConnectTooManyRequestsError,
+)
 
 from garmin_owl.client import GarminDataClient
 from garmin_owl.database import GarminDatabase
@@ -19,6 +23,7 @@ from garmin_owl.models import (
     TrainingLoad,
     TrainingReadiness,
 )
+from garmin_owl.notices import RATE_LIMITED
 from garmin_owl.tools import GarminTools, parse_date, parse_range, validate_activity_id
 
 DATE = "2026-08-30"
@@ -264,8 +269,8 @@ def test_v2_bound_validation(tools: GarminTools) -> None:
         tools.get_recent_activities(days=91)
     with pytest.raises(ValueError, match="1 and 90"):
         tools.get_running_tolerance(days=91)
-    with pytest.raises(ValueError, match="one of 7, 14, or 28"):
-        tools.get_recovery_trend(8)
+    with pytest.raises(ValueError, match="between 1 and 28"):
+        tools.get_recovery_trend(29)
     with pytest.raises(ValueError, match="between 2 and 10"):
         tools.compare_activities([1])
     with pytest.raises(ValueError, match="unique"):
@@ -690,7 +695,8 @@ def test_body_composition_reads_nested_daily_weight_summaries(tmp_path: Path) ->
     fake = WeightSummaryGarmin()
     tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
     result = tools.get_body_composition("2026-01-01", "2026-01-10")
-    assert result == [{"timestamp": "2026-01-05T07:30:00", "weight_kg": 70.25}]
+    assert result["count"] == 1
+    assert result["entries"] == [{"timestamp": "2026-01-05T07:30:00+01:00", "weight_kg": 70.25}]
 
 
 def test_trend_reads_missing_readiness_from_garmin_only_once(tmp_path: Path) -> None:
@@ -773,15 +779,15 @@ def test_activity_lists_only_flag_notes_live_and_cached(tmp_path: Path) -> None:
         {
             "activity_id": 1,
             "name": "CrossFit",
-            "start_time": "2026-08-20 18:00:00",
+            "start_time": "2026-08-20T18:00:00+02:00",
             "has_description": True,
         },
-        {"activity_id": 2, "name": "Run", "start_time": "2026-08-20 07:00:00"},
+        {"activity_id": 2, "name": "Run", "start_time": "2026-08-20T07:00:00+02:00"},
     ]
     live = GarminTools(_client(fake)).get_activities("2026-08-20", "2026-08-20")
     cached = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
-    assert live == expected
-    assert cached.get_activities("2026-08-20", "2026-08-20") == expected
+    assert live["activities"] == expected
+    assert cached.get_activities("2026-08-20", "2026-08-20") == live
 
 
 def test_refresh_picks_up_a_note_edited_after_the_detail_was_cached(tmp_path: Path) -> None:
@@ -844,7 +850,7 @@ def test_weigh_in_refresh_reconciles_only_valid_responses(
     )
     tools = GarminTools(_client(WeightGarmin()), database)
     if response == {"dateWeightList": []}:
-        assert tools.get_body_composition("2026-01-01", "2026-01-01") == []
+        assert tools.get_body_composition("2026-01-01", "2026-01-01")["entries"] == []
     else:
         with pytest.raises(ValueError, match="Incomplete"):
             tools.get_body_composition("2026-01-01", "2026-01-01")
@@ -879,3 +885,169 @@ def test_production_client_checks_authenticated_identity_before_cache_reads(
     same = GarminTools(GarminDataClient(), database)
     assert same.get_daily_summary("2026-01-01")["steps"] == 1000
     assert api.calls == []
+
+
+@pytest.mark.parametrize("days", [1, 8, 21, 28])
+def test_recovery_trend_supports_any_window_up_to_28_days(tmp_path: Path, days: int) -> None:
+    fake = FakeGarmin()
+    service = GarminTools(_client(fake), GarminDatabase(tmp_path / "trend.sqlite"))
+    trend = service.get_recovery_trend(days)
+    assert trend["days"] == days
+    assert len(trend["points"]) == days
+
+
+class LimitedGarmin(FakeGarmin):
+    """Enforces Garmin's 31-day Body Battery range limit and rate-limits readiness reads."""
+
+    def __init__(self, readiness_budget: int | None = None) -> None:
+        super().__init__()
+        self.readiness_budget = readiness_budget
+
+    def get_body_battery(self, startdate: str, enddate: str | None = None) -> list[dict[str, Any]]:
+        end = enddate or startdate
+        days = (date.fromisoformat(end) - date.fromisoformat(startdate)).days + 1
+        if days > 31:
+            raise GarminConnectConnectionError("Body battery client error (400): range too long")
+        first = date.fromisoformat(startdate).toordinal()
+        return self._record(
+            "get_body_battery",
+            [
+                {"date": date.fromordinal(first + i).isoformat(), "charged": 40, "drained": 50}
+                for i in range(days)
+            ],
+        )
+
+    def get_training_readiness(self, cdate: str) -> list[dict[str, Any]]:
+        if self.readiness_budget is not None:
+            if self.readiness_budget == 0:
+                raise GarminConnectTooManyRequestsError("Rate limit exceeded")
+            self.readiness_budget -= 1
+        return super().get_training_readiness(cdate)
+
+
+def test_rate_limit_during_readiness_reads_keeps_the_rest_of_the_trend(tmp_path: Path) -> None:
+    fake = LimitedGarmin(readiness_budget=10)
+    service = GarminTools(_client(fake), GarminDatabase(tmp_path / "trend.sqlite"))
+    trend = service.get_recovery_trend(28)
+    assert len(trend["points"]) == 28
+    notice = next(
+        item
+        for item in trend["availability"]
+        if item["field"] == "training_readiness" and item["status"] == RATE_LIMITED
+    )
+    assert "18 day(s)" in notice["message"] and "unknown, not absent" in notice["message"]
+    assert sum("training_readiness" in point for point in trend["points"]) == 10
+    # Days already read stay cached, so asking again later continues where it stopped.
+    fake.readiness_budget = None
+    fake.calls.clear()
+    again = service.get_recovery_trend(28)
+    assert fake.calls.count("get_training_readiness") == 18
+    assert all("training_readiness" in point for point in again["points"])
+
+
+def test_date_errors_distinguish_format_from_impossible_dates() -> None:
+    with pytest.raises(ValueError, match=r"'10/10/2026' must use YYYY-MM-DD format"):
+        parse_date("10/10/2026")
+    with pytest.raises(ValueError, match=r"'2026-1-5' must use YYYY-MM-DD format"):
+        parse_date("2026-1-5")
+    with pytest.raises(ValueError, match=r"'2026-02-30' is not a real calendar date"):
+        parse_date("2026-02-30")
+    with pytest.raises(ValueError, match=r"^start_date '2026-13-01' is not a real"):
+        parse_range("2026-13-01", "2026-12-31")
+
+
+class EmptyDayGarmin(FakeGarmin):
+    def get_sleep_data(self, cdate: str) -> dict[str, Any]:
+        return self._record("get_sleep_data", {"dailySleepDTO": {}})
+
+    def get_hrv_data(self, cdate: str) -> dict[str, Any]:
+        return self._record("get_hrv_data", {})
+
+    def get_training_readiness(self, cdate: str) -> list[dict[str, Any]]:
+        return self._record("get_training_readiness", [])
+
+    def get_stress_data(self, cdate: str) -> dict[str, Any]:
+        return self._record("get_stress_data", {"calendarDate": cdate})
+
+    def get_body_battery(self, startdate: str, enddate: str | None = None) -> list[dict[str, Any]]:
+        return self._record("get_body_battery", [])
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize(
+    ("method", "field"),
+    [
+        ("get_sleep", "sleep"),
+        ("get_hrv", "hrv"),
+        ("get_training_readiness", "training_readiness"),
+        ("get_stress", "stress"),
+        ("get_body_battery", "body_battery"),
+    ],
+)
+def test_standalone_tools_disclose_a_day_without_garmin_data(
+    tmp_path: Path, method: str, field: str, cached: bool
+) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite") if cached else None
+    service = GarminTools(_client(EmptyDayGarmin()), database)
+    for _ in range(2 if cached else 1):  # the second read is served from the cache
+        result = getattr(service, method)(DATE)
+        assert result["date"] == DATE
+        assert [(item["field"], item["status"]) for item in result["availability"]] == [
+            (field, "missing_or_unsupported")
+        ]
+
+
+class SixActivitiesGarmin(FakeGarmin):
+    def get_activities_by_date(
+        self, startdate: str, enddate: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self._record(
+            "get_activities_by_date",
+            [{"activityId": i, "startTimeLocal": f"2026-10-0{i} 08:00:00"} for i in range(1, 7)],
+        )
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_activity_lists_report_count_and_truncation(tmp_path: Path, cached: bool) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite") if cached else None
+    service = GarminTools(_client(SixActivitiesGarmin()), database)
+    five = service.get_activities("2026-10-01", "2026-10-06", limit=5)
+    assert (five["count"], five["truncated"], five["limit"]) == (5, True, 5)
+    assert len(five["activities"]) == 5
+    six = service.get_activities("2026-10-01", "2026-10-06", limit=6)
+    assert (six["count"], six["truncated"]) == (6, False)
+    recent = service.get_recent_activities(days=90, limit=5)
+    assert recent["truncated"] is True and recent["count"] == 5
+
+
+def test_recovery_time_is_hours_both_live_and_cached(tmp_path: Path) -> None:
+    class Recovering(FakeGarmin):
+        def get_training_readiness(self, cdate: str) -> list[dict[str, Any]]:
+            return self._record("get_training_readiness", [{"score": 60, "recoveryTime": 402}])
+
+    live = GarminTools(_client(Recovering())).get_training_readiness(DATE)
+    cached_service = GarminTools(_client(Recovering()), GarminDatabase(tmp_path / "g.sqlite"))
+    cached_service.get_training_readiness(DATE)
+    assert live["recovery_time_hours"] == 6.7
+    assert cached_service.get_training_readiness(DATE) == live
+
+
+def test_activity_detail_keeps_list_only_stride_length(tmp_path: Path) -> None:
+    class StrideGarmin(FakeGarmin):
+        def get_activities_by_date(
+            self, startdate: str, enddate: str | None = None
+        ) -> list[dict[str, Any]]:
+            return self._record(
+                "get_activities_by_date",
+                [
+                    {
+                        "activityId": 1,
+                        "startTimeLocal": f"{startdate} 08:00:00",
+                        "avgStrideLength": 72.6,
+                    }
+                ],
+            )
+
+    service = GarminTools(_client(StrideGarmin()), GarminDatabase(tmp_path / "garmin.sqlite"))
+    service.get_activities(DATE, DATE)
+    assert service.get_activity(1)["summary"]["average_stride_length_m"] == 0.726

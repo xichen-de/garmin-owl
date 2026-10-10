@@ -12,6 +12,17 @@ SKIN_TEMPERATURE_BASIS = (
 )
 
 
+TIME_CONVENTION = (
+    "ISO 8601 with an explicit UTC offset, e.g. 2026-10-09T23:18:16+02:00. The wall time is "
+    "already local; never add the offset again. The offset is the one Garmin recorded for the "
+    "device at that moment, or this computer's time zone when Garmin gives only UTC."
+)
+
+
+def _instant(what: str) -> Any:
+    return Field(default=None, description=f"{what}: {TIME_CONVENTION}")
+
+
 class OwlModel(BaseModel):
     """Base model that tolerates upstream drift while emitting compact JSON."""
 
@@ -33,7 +44,10 @@ class AvailabilityNotice(OwlModel):
 
 
 class TimePoint(OwlModel):
-    timestamp: str | int
+    timestamp: str | int = Field(
+        description=f"Reading time: {TIME_CONVENTION} A bare date or number is a Garmin value "
+        "that could not be parsed as a time."
+    )
     value: float | int
 
 
@@ -79,15 +93,19 @@ class SleepSummary(OwlModel):
     light_sleep_seconds: int | None = None
     rem_sleep_seconds: int | None = None
     awake_seconds: int | None = None
-    sleep_start: str | None = None
-    sleep_end: str | None = None
+    sleep_start: str | None = _instant("Sleep start")
+    sleep_end: str | None = _instant("Sleep end")
     average_respiration: float | None = None
     lowest_respiration: float | None = None
     highest_respiration: float | None = None
     average_spo2_percent: float | None = None
     lowest_spo2_percent: float | None = None
     average_hr_bpm: float | None = None
-    average_stress: float | None = None
+    average_stress: float | None = Field(
+        default=None,
+        description="Garmin's average stress during sleep, to one decimal. A different metric "
+        "from the whole-day average_stress of get_stress and get_daily_summary.",
+    )
     nap_seconds: int | None = None
     awake_count: int | None = None
     restless_moments_count: int | None = None
@@ -102,6 +120,7 @@ class SleepSummary(OwlModel):
     skin_temperature_basis: str | None = None
     body_battery_change: int | None = None
     sleep_score_feedback: str | None = None
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
 
 
 class HrvSummary(OwlModel):
@@ -112,7 +131,8 @@ class HrvSummary(OwlModel):
     last_night_average_ms: float | None = None
     baseline_low_ms: float | None = None
     baseline_high_ms: float | None = None
-    readings: list[TimePoint] | None = None
+    timeseries: list[TimePoint] | None = None
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
 
 
 class TrainingReadiness(OwlModel):
@@ -120,13 +140,15 @@ class TrainingReadiness(OwlModel):
     score: int | None = None
     level: str | None = None
     feedback: str | None = None
-    timestamp: str | None = None
+    timestamp: str | None = _instant("When Garmin calculated this readiness")
     sleep_score: int | None = None
     hrv_factor_percent: float | None = None
     acute_load_factor_percent: float | None = None
     sleep_history_factor_percent: float | None = None
     stress_history_factor_percent: float | None = None
-    recovery_time_minutes: int | None = None
+    recovery_time_hours: float | None = Field(
+        default=None, description="Garmin's remaining recovery time in hours, to one decimal."
+    )
     hrv_factor_feedback: str | None = None
     acute_load_factor_feedback: str | None = None
     sleep_history_factor_feedback: str | None = None
@@ -134,6 +156,7 @@ class TrainingReadiness(OwlModel):
     stress_history_factor_feedback: str | None = None
     recovery_time_factor_feedback: str | None = None
     recovery_time_change_phrase: str | None = None
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
 
 
 class BodyBatterySummary(OwlModel):
@@ -150,7 +173,11 @@ class BodyBatterySummary(OwlModel):
 
 class StressSummary(OwlModel):
     date: str
-    average_stress: int | None = None
+    average_stress: int | None = Field(
+        default=None,
+        description="Garmin's whole-day average stress (0-100). Sleep stress is a separate "
+        "metric reported by get_sleep.",
+    )
     max_stress: int | None = None
     stress_duration_seconds: int | None = None
     rest_duration_seconds: int | None = None
@@ -176,7 +203,7 @@ class RecoverySummary(OwlModel):
 class ActivitySummary(OwlModel):
     activity_id: int
     name: str | None = None
-    start_time: str | None = None
+    start_time: str | None = _instant("Activity start")
     activity_type: str | None = None
     duration_seconds: float | None = None
     elapsed_seconds: float | None = None
@@ -237,7 +264,7 @@ class ActivitySummary(OwlModel):
 
 class ActivityLap(OwlModel):
     lap_index: int | None = None
-    start_time: str | None = None
+    start_time: str | None = _instant("Lap start")
     duration_seconds: float | None = None
     distance_m: float | None = None
     average_hr_bpm: float | None = None
@@ -464,7 +491,7 @@ class CycleSummary(OwlModel):
 
 
 class BodyCompositionEntry(OwlModel):
-    timestamp: str | None = None
+    timestamp: str | None = _instant("Weigh-in time")
     weight_kg: float | None = None
     bmi: float | None = None
     body_fat_percent: float | None = None
@@ -472,3 +499,25 @@ class BodyCompositionEntry(OwlModel):
     muscle_mass_kg: float | None = None
     bone_mass_kg: float | None = None
     visceral_fat_rating: float | None = None
+
+
+class ActivityList(OwlModel):
+    start_date: str
+    end_date: str
+    activity_type: str | None = None
+    limit: int
+    count: int = Field(description="Number of activities returned.")
+    truncated: bool = Field(
+        description="True when more activities matched than limit allowed; narrow the range "
+        "or raise limit (at most 100) to see the rest."
+    )
+    activities: list[ActivitySummary] = Field(default_factory=list)
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
+
+
+class BodyCompositionList(OwlModel):
+    start_date: str
+    end_date: str
+    count: int = Field(description="Number of weigh-ins returned.")
+    entries: list[BodyCompositionEntry] = Field(default_factory=list)
+    availability: list[AvailabilityNotice] = Field(default_factory=list)

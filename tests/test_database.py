@@ -4,14 +4,17 @@ import sqlite3
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from garmin_owl import database as database_module
-from garmin_owl.database import SCHEMA_VERSION, GarminDatabase
+from garmin_owl.database import SCHEMA_VERSION, GarminDatabase, GarminOwlCacheError
 from garmin_owl.models import (
     ActivityDetail,
+    ActivityLap,
     ActivitySummary,
+    BodyCompositionEntry,
     DailySummary,
     HrvSummary,
     SleepSummary,
@@ -394,15 +397,26 @@ def test_activity_ratings_survive_list_reads_and_clear_on_detail_reads(tmp_path:
     assert (cached.summary.perceived_effort, cached.summary.feel) == (None, None)
 
 
-def test_account_binding_rejects_other_accounts_and_unknown_legacy_data(tmp_path: Path) -> None:
+def test_account_binding_discards_unowned_rows_and_rejects_other_accounts(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "cache.sqlite"
     database = GarminDatabase(path)
     database.put_daily(DailySummary(date="2026-01-01", steps=42))
-    with pytest.raises(RuntimeError, match="ownership is unknown"):
-        database.bind_account("account-a")
-    assert database.get_daily("2026-01-01") is not None
-    database.clear()
+    database.put_activity_detail(
+        ActivityDetail(
+            summary=ActivitySummary(activity_id=1, start_time="2026-01-01T08:00:00+01:00"),
+            laps=[ActivityLap(lap_index=1)],
+            hr_zones_seconds={"zone_1": 60},
+        )
+    )
+    database.mark_synced("activities", "2026-01-01:2026-01-01")
+    # Rows cached before accounts were recorded cannot be attributed: they are dropped, not
+    # served, and no longer block every read until the user clears the cache by hand.
     database.bind_account("account-a")
+    assert database.get_daily("2026-01-01") is None
+    assert database.get_activity(1) is None
+    assert not database.is_activity_range_fresh("2026-01-01", "2026-01-01")
     database.put_daily(DailySummary(date="2026-01-01", steps=42))
     database.close()
     reopened = GarminDatabase(path)
@@ -431,3 +445,129 @@ def test_range_replacement_rolls_back_deletions_and_partial_writes(
     assert database.get_activity(1) is not None
     assert database.get_activity(2) is None
     assert not database.is_activity_range_fresh("2026-01-01", "2026-01-01")
+
+
+def test_schema_seven_cache_drops_ambiguous_timestamps_and_rereads_them(tmp_path: Path) -> None:
+    path = tmp_path / "cache.sqlite"
+    database = GarminDatabase(path)
+    database.bind_account("account-a")
+    # Version 7 stored Garmin's local wall time encoded as if it were UTC.
+    database.put_sleep(SleepSummary(date="2026-10-10", sleep_score=80, sleep_start="1791587896000"))
+    database.put_daily(
+        DailySummary(date="2026-10-10", steps=1),
+        TrainingReadiness(date="2026-10-10", score=70, timestamp="2026-10-10T07:00:29.0"),
+    )
+    database.mark_synced("readiness", "2026-10-10")
+    database.put_activity_detail(
+        ActivityDetail(summary=ActivitySummary(activity_id=1, start_time="2026-10-10 07:30:00"))
+    )
+    database.mark_synced("activities", "2026-10-10:2026-10-10")
+    database.put_body_composition([BodyCompositionEntry(timestamp="2026-10-10T07:00:00")])
+    database.mark_synced("body_composition", "2026-10-10:2026-10-10")
+    database.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version = 7")
+
+    migrated = GarminDatabase(path)
+    later = datetime(2026, 10, 12, 12, tzinfo=UTC)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    sleep = migrated.get_sleep("2026-10-10")
+    assert sleep is not None and sleep.sleep_score == 80 and sleep.sleep_start is None
+    assert not migrated.is_fresh("sleep", "2026-10-10", now=later)
+    readiness = migrated.get_readiness("2026-10-10")
+    assert readiness is not None and readiness.timestamp is None
+    assert not migrated.is_fresh("readiness", "2026-10-10", now=later)
+    assert migrated.get_activity(1, require_detail=True, now=later) is None
+    assert not migrated.is_activity_range_fresh("2026-10-10", "2026-10-10", now=later)
+    assert migrated.get_body_composition("2026-10-10", "2026-10-10") == []
+    assert not migrated.is_range_fresh("body_composition", "2026-10-10", "2026-10-10", now=later)
+    # The account binding survives a format migration.
+    migrated.bind_account("account-a")
+
+
+def test_newer_schema_cache_is_kept_aside_instead_of_failing_every_read(tmp_path: Path) -> None:
+    path = tmp_path / "cache.sqlite"
+    database = GarminDatabase(path)
+    database.put_daily(DailySummary(date="2026-10-10", steps=7))
+    database.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+
+    fresh = GarminDatabase(path)
+    assert fresh.get_daily("2026-10-10") is None
+    fresh.put_daily(DailySummary(date="2026-10-10", steps=8))
+    kept = tmp_path / f"cache.sqlite.schema-{SCHEMA_VERSION + 1}"
+    with sqlite3.connect(kept) as connection:
+        assert connection.execute("SELECT steps FROM daily_metrics").fetchone()[0] == 7
+
+
+def test_version_is_rechecked_on_every_transaction(tmp_path: Path) -> None:
+    path = tmp_path / "cache.sqlite"
+    database = GarminDatabase(path)
+    database.put_daily(DailySummary(date="2026-10-10", steps=7))
+    with sqlite3.connect(path) as other_process:
+        other_process.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    with pytest.raises(GarminOwlCacheError, match=r"newer garmin-owl.*Restart"):
+        database.get_daily("2026-10-10")
+    with sqlite3.connect(path) as other_process:
+        other_process.execute("PRAGMA user_version = 7")
+    # An older layout written underneath a running server is migrated before it is read.
+    assert database.get_daily("2026-10-10") is not None
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    ("table", "read"),
+    [
+        ("sleep", lambda database: database.get_sleep("2026-10-10")),
+        ("daily_metrics", lambda database: database.get_daily("2026-10-10")),
+        ("hrv", lambda database: database.get_hrv("2026-10-10")),
+    ],
+)
+def test_unreadable_cached_row_is_a_cache_miss_not_a_crash(
+    tmp_path: Path, table: str, read: Any
+) -> None:
+    database = GarminDatabase(tmp_path / "cache.sqlite")
+    with database.connect() as connection:
+        # A value no current model accepts, standing in for any future format drift.
+        connection.execute(
+            f"INSERT INTO {table}(date, fetched_at) VALUES('2026-10-10', 'not-a-timestamp')"
+        )
+        column = {"sleep": "sleep_score", "daily_metrics": "steps", "hrv": "nightly_avg_ms"}[table]
+        connection.execute(f"UPDATE {table} SET {column}='unreadable'")
+    assert read(database) is None
+    with database.connect() as connection:
+        assert connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_schema_eight_cache_corrects_units_zeros_and_rounding_in_place(tmp_path: Path) -> None:
+    path = tmp_path / "cache.sqlite"
+    database = GarminDatabase(path)
+    database.put_activity_detail(
+        ActivityDetail(
+            summary=ActivitySummary(
+                activity_id=1,
+                start_time="2026-10-05T08:00:00+02:00",
+                average_stride_length_m=72.606,
+                distance_m=0.0,
+                average_speed_mps=0.0,
+                average_respiration=26.940000534057617,
+            )
+        )
+    )
+    database.put_sleep(SleepSummary(date="2026-10-07", skin_temperature_deviation_c=-0.0))
+    database.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version = 8")
+
+    migrated = GarminDatabase(path)
+    activity = migrated.get_activity(1)
+    assert activity is not None
+    summary = activity.summary
+    assert summary.average_stride_length_m == pytest.approx(0.72606)
+    assert (summary.distance_m, summary.average_speed_mps) == (None, None)
+    assert summary.average_respiration == 26.9
+    sleep = migrated.get_sleep("2026-10-07")
+    assert sleep is not None and str(sleep.skin_temperature_deviation_c) == "0.0"

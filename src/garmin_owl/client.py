@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter
 from collections.abc import Callable
+from datetime import date, timedelta
+from functools import partial
 from typing import Any, Protocol
 
 from garminconnect import (
@@ -58,12 +61,86 @@ class GarminOwlRateLimitError(GarminOwlError):
     pass
 
 
+class GarminOwlRequestError(GarminOwlError):
+    """Garmin rejected the request itself (HTTP 4xx); retrying the same request cannot help."""
+
+
 class GarminOwlUnavailableError(GarminOwlError):
     pass
 
 
+class GarminOwlNetworkError(GarminOwlUnavailableError):
+    pass
+
+
+class GarminOwlServerError(GarminOwlUnavailableError):
+    pass
+
+
+class GarminOwlResponseError(GarminOwlUnavailableError):
+    """Garmin answered, but not in a shape garmin-owl understands."""
+
+
 class GarminOwlMissingDataError(GarminOwlError):
     pass
+
+
+# Garmin's daily Body Battery report answers HTTP 400 for ranges longer than 31 days
+# (verified live; 31 succeeds, 32 fails).
+BODY_BATTERY_RANGE_DAYS = 31
+_STATUS_IN_MESSAGE = re.compile(r"(?:\(|API Error |HTTP )([1-5]\d\d)\b")
+_NETWORK_ERROR_NAMES = frozenset(
+    {"ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout", "SSLError", "ProxyError"}
+)
+
+
+def _status_code(exc: BaseException) -> int | None:
+    """HTTP status of an upstream failure, from its response or its fixed message prefix."""
+    for candidate in (exc, getattr(exc, "response", None)):
+        status = getattr(candidate, "status_code", None)
+        if isinstance(status, int):
+            return status
+    match = _STATUS_IN_MESSAGE.search(str(exc))
+    return int(match.group(1)) if match else None
+
+
+def _has_network_cause(exc: BaseException) -> bool:
+    """Whether a transport failure (DNS, refused connection, timeout, TLS) caused ``exc``."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        # requests and curl_cffi define parallel hierarchies; match both by class name.
+        if isinstance(current, OSError | TimeoutError) or any(
+            cls.__name__ in _NETWORK_ERROR_NAMES for cls in type(current).__mro__
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _connection_error(exc: BaseException) -> GarminOwlError:
+    """Classify upstream's catch-all connection error by what actually went wrong."""
+    status = _status_code(exc)
+    if status is not None and 400 <= status < 500:
+        return GarminOwlRequestError(
+            f"Garmin rejected this request as invalid or too large (HTTP {status}). Check the "
+            "dates and ranges, or ask for a shorter period; retrying it unchanged will not help."
+        )
+    if status is not None and status >= 500:
+        return GarminOwlServerError(
+            f"Garmin Connect returned a server error (HTTP {status}). Try again later; "
+            "garmin-owl does not auto-retry."
+        )
+    if _has_network_cause(exc):
+        return GarminOwlNetworkError(
+            "Could not reach Garmin Connect (network error or timeout). Check the connection "
+            "and try again later; garmin-owl does not auto-retry."
+        )
+    return GarminOwlResponseError(
+        "Garmin Connect answered this read with an unusable response; its private API may "
+        "have changed."
+    )
 
 
 def _safe_call[T](call: Callable[[], T]) -> T:
@@ -72,7 +149,8 @@ def _safe_call[T](call: Callable[[], T]) -> T:
         return call()
     except GarminConnectTooManyRequestsError:
         raise GarminOwlRateLimitError(
-            "Garmin rate limit reached. Wait before trying again; garmin-owl does not auto-retry."
+            "Garmin rate limit reached (HTTP 429). Wait several minutes before trying again; "
+            "garmin-owl does not auto-retry."
         ) from None
     except GarminConnectAuthenticationError:
         raise GarminOwlAuthError(
@@ -82,21 +160,22 @@ def _safe_call[T](call: Callable[[], T]) -> T:
         raise GarminOwlMissingDataError(
             "Garmin returned no data for this request; the metric may be unsupported."
         ) from None
-    except GarminConnectConnectionError:
-        raise GarminOwlUnavailableError(
-            "Garmin Connect is unavailable or rejected this read request. Try again later."
-        ) from None
+    except GarminConnectConnectionError as exc:
+        raise _connection_error(exc) from None
     except (KeyError, TypeError, ValueError):
-        raise GarminOwlUnavailableError(
+        raise GarminOwlResponseError(
             "Garmin returned an unexpected response shape; its private API may have changed."
         ) from None
+    except OSError as exc:
+        # A transport failure that escaped upstream's own translation.
+        raise _connection_error(exc) from None
 
 
 class GarminDataClient:
     """Explicit allow-list of Garmin reads; no generic request or mutation access."""
 
     def __init__(self, api: GarminReadAPI | None = None) -> None:
-        self.__api: GarminReadAPI = api if api is not None else load_saved_client()
+        self.__api: GarminReadAPI = api if api is not None else _safe_call(load_saved_client)
         self.__calls: Counter[str] = Counter()
         self.cache_identity: str | None = None
         if api is None:
@@ -148,11 +227,19 @@ class GarminDataClient:
     def body_battery(self, cdate: str) -> Any:
         return self._read("body battery", lambda: self.__api.get_body_battery(cdate, cdate))
 
-    def body_battery_range(self, startdate: str, enddate: str) -> Any:
-        return self._read(
-            "body battery range",
-            lambda: self.__api.get_body_battery(startdate, enddate),
-        )
+    def body_battery_range(self, startdate: str, enddate: str) -> list[Any]:
+        """Read daily Body Battery reports, split into chunks Garmin accepts."""
+        result: list[Any] = []
+        start, end = date.fromisoformat(startdate), date.fromisoformat(enddate)
+        while start <= end:
+            chunk_end = min(start + timedelta(days=BODY_BATTERY_RANGE_DAYS - 1), end)
+            chunk = self._read(
+                "body battery range",
+                partial(self.__api.get_body_battery, start.isoformat(), chunk_end.isoformat()),
+            )
+            result.extend(chunk if isinstance(chunk, list) else [chunk])
+            start = chunk_end + timedelta(days=1)
+        return result
 
     def stress(self, cdate: str) -> Any:
         return self._read("stress", lambda: self.__api.get_stress_data(cdate))
