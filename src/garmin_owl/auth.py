@@ -208,9 +208,7 @@ def _refresh_saved_token(api: Garmin, path: Path) -> None:
 
 def _load_profile_once(api: Garmin, path: Path) -> None:
     """Fetch only the profile field Owl needs, with one bounded request."""
-    profile = api.connectapi(
-        "/userprofile-service/socialProfile", timeout=REFRESH_TIMEOUT_SECONDS
-    )
+    profile = api.connectapi("/userprofile-service/socialProfile", timeout=REFRESH_TIMEOUT_SECONDS)
     display_name = profile.get("displayName") if isinstance(profile, dict) else None
     if not isinstance(display_name, str) or not display_name.strip():
         raise GarminConnectAuthenticationError(

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable
 from datetime import date, timedelta
+from functools import wraps
 from statistics import fmean
 from typing import Any
-
-from pydantic import TypeAdapter, ValidationError
 
 from .client import (
     GarminDataClient,
@@ -21,10 +21,11 @@ from .database import GarminDatabase
 from .models import (
     ActivityComparison,
     ActivityDetail,
+    ActivityList,
     ActivitySummary,
     AvailabilityNotice,
     BodyBatterySummary,
-    BodyCompositionEntry,
+    BodyCompositionList,
     ComparisonDelta,
     DailyRecoveryPoint,
     DailySummary,
@@ -40,6 +41,7 @@ from .models import (
     TrendMetric,
 )
 from .normalize import (
+    hours_from_minutes,
     normalize_activities,
     normalize_activity_detail,
     normalize_body_battery,
@@ -66,9 +68,12 @@ from .notices import (
 )
 from .sync import SyncEngine, dates_between, read_training_load_sources
 
-_DATE = TypeAdapter(date)
+_DATE_FORMAT = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Keys that identify or qualify a day rather than carry a Garmin measurement.
+_NOT_METRICS = frozenset({"date", "availability", "skin_temperature_basis"})
 MAX_RANGE_DAYS = 366
 MAX_ACTIVITIES = 100
+MAX_TREND_DAYS = 28
 DEFAULT_RANGE_DAYS = 30
 # Window used when get_activities is called without any date, so the cached and uncached paths
 # answer the same question instead of silently differing.
@@ -86,16 +91,46 @@ _FAILURE_MESSAGE = {
 }
 
 
-def parse_date(value: str | None, *, default: date | None = None) -> date:
+class GarminOwlInputError(ValueError):
+    """A fixed, user-correctable validation message safe to expose over MCP."""
+
+
+def parse_date(value: str | None, *, default: date | None = None, name: str = "date") -> date:
     if value is None:
         return default or date.today()
+    shown = repr(value[:20]) if isinstance(value, str) else type(value).__name__
+    if not isinstance(value, str) or not _DATE_FORMAT.fullmatch(value):
+        raise GarminOwlInputError(f"{name} {shown} must use YYYY-MM-DD format, e.g. 2026-10-09")
     try:
-        parsed = _DATE.validate_python(value)
-    except ValidationError:
-        raise ValueError("date must be a real calendar date in YYYY-MM-DD format") from None
-    if str(parsed) != value:
-        raise ValueError("date must use exact YYYY-MM-DD format")
-    return parsed
+        return date.fromisoformat(value)
+    except ValueError:
+        raise GarminOwlInputError(f"{name} {shown} is not a real calendar date") from None
+
+
+def _disclosing_missing(
+    field: str, label: str
+) -> Callable[[Callable[..., dict[str, Any]]], Callable[..., dict[str, Any]]]:
+    """Say so when Garmin returned no values for a day, instead of answering with a bare date."""
+
+    def decorator(read: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+        @wraps(read)
+        def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            data = read(*args, **kwargs)
+            if data.get("availability") or any(key not in _NOT_METRICS for key in data):
+                return data
+            notice = AvailabilityNotice(
+                field=field,
+                status=MISSING_OR_UNSUPPORTED,
+                message=(
+                    f"Garmin returned no {label} for {data['date']}: the device may not have "
+                    "been worn, synced yet, or support it. Nothing was estimated."
+                ),
+            )
+            return {**data, "availability": [notice.compact()]}
+
+        return wrapper
+
+    return decorator
 
 
 def parse_range(
@@ -105,18 +140,20 @@ def parse_range(
     default_days: int = DEFAULT_RANGE_DAYS,
 ) -> tuple[str, str]:
     today = date.today()
-    end = parse_date(end_date, default=today)
-    start = parse_date(start_date, default=end - timedelta(days=default_days - 1))
+    end = parse_date(end_date, default=today, name="end_date")
+    start = parse_date(
+        start_date, default=end - timedelta(days=default_days - 1), name="start_date"
+    )
     if start > end:
-        raise ValueError("start_date must be on or before end_date")
+        raise GarminOwlInputError("start_date must be on or before end_date")
     if (end - start).days + 1 > MAX_RANGE_DAYS:
-        raise ValueError(f"date range cannot exceed {MAX_RANGE_DAYS} days")
+        raise GarminOwlInputError(f"date range cannot exceed {MAX_RANGE_DAYS} days")
     return start.isoformat(), end.isoformat()
 
 
 def validate_activity_id(activity_id: int) -> int:
     if isinstance(activity_id, bool) or activity_id <= 0:
-        raise ValueError("activity_id must be a positive integer")
+        raise GarminOwlInputError("activity_id must be a positive integer")
     return activity_id
 
 
@@ -174,6 +211,7 @@ class GarminTools:
                 return cached.compact()
         return normalize_daily_summary(self.client.daily_summary(cdate), cdate).compact()
 
+    @_disclosing_missing("sleep", "sleep data")
     def get_sleep(self, date: str | None = None) -> dict[str, Any]:
         cdate = parse_date(date).isoformat()
         if self.database is not None:
@@ -183,6 +221,7 @@ class GarminTools:
                 return cached.compact()
         return normalize_sleep(self.client.sleep(cdate), cdate).compact()
 
+    @_disclosing_missing("hrv", "HRV data")
     def get_hrv(self, date: str | None = None, include_timeseries: bool = False) -> dict[str, Any]:
         cdate = parse_date(date).isoformat()
         if self.database is not None and not include_timeseries:
@@ -194,6 +233,7 @@ class GarminTools:
             self.client.hrv(cdate), cdate, include_timeseries=include_timeseries
         ).compact()
 
+    @_disclosing_missing("training_readiness", "training readiness")
     def get_training_readiness(self, date: str | None = None) -> dict[str, Any]:
         cdate = parse_date(date).isoformat()
         if self.database is not None:
@@ -203,6 +243,7 @@ class GarminTools:
                 return cached.compact()
         return normalize_training_readiness(self.client.training_readiness(cdate), cdate).compact()
 
+    @_disclosing_missing("body_battery", "Body Battery data")
     def get_body_battery(
         self, date: str | None = None, include_timeseries: bool = False
     ) -> dict[str, Any]:
@@ -225,6 +266,7 @@ class GarminTools:
             self.database.put_body_battery(item)
         return item.compact()
 
+    @_disclosing_missing("stress", "stress data")
     def get_stress(
         self, date: str | None = None, include_timeseries: bool = False
     ) -> dict[str, Any]:
@@ -298,9 +340,9 @@ class GarminTools:
         start_date: str | None = None,
         end_date: str | None = None,
         limit: int = 20,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         if isinstance(limit, bool) or not 1 <= limit <= MAX_ACTIVITIES:
-            raise ValueError(f"limit must be between 1 and {MAX_ACTIVITIES}")
+            raise GarminOwlInputError(f"limit must be between 1 and {MAX_ACTIVITIES}")
         if start_date is None and end_date is None:
             # Both paths answer the same bounded question. Previously the uncached path asked
             # Garmin for the N most recent activities of all time while the cached path silently
@@ -310,14 +352,38 @@ class GarminTools:
             end = today.isoformat()
         else:
             start, end = parse_range(start_date, end_date)
+        return self._activity_list(start, end, limit)
+
+    def _activity_list(
+        self, start: str, end: str, limit: int, activity_type: str | None = None
+    ) -> dict[str, Any]:
+        """List activities newest first, reading one more than limit to detect truncation."""
         if self.database is not None and self.sync is not None:
             self.sync.ensure_activities(start, end)
-            return [
-                item.listing().compact()
-                for item in self.database.list_activities(start, end, limit=limit)
-            ]
-        raw = self.client.activities(start, end, limit)
-        return [item.listing().compact() for item in normalize_activities(raw, limit)]
+            items = self.database.list_activities(
+                start, end, limit=limit + 1, activity_type=activity_type
+            )
+        else:
+            # Filter by type before applying the limit, or other types could crowd out matches.
+            items = normalize_activities(
+                self.client.activities(start, end, None if activity_type else limit + 1)
+            )
+            if activity_type:
+                items = [
+                    item
+                    for item in items
+                    if (item.activity_type or "").casefold() == activity_type.casefold()
+                ]
+        shown = items[:limit]
+        return ActivityList(
+            start_date=start,
+            end_date=end,
+            activity_type=activity_type,
+            limit=limit,
+            count=len(shown),
+            truncated=len(items) > limit,
+            activities=[item.listing() for item in shown],
+        ).compact()
 
     def get_activity(self, activity_id: int, refresh: bool = False) -> dict[str, Any]:
         validate_activity_id(activity_id)
@@ -336,16 +402,21 @@ class GarminTools:
         detail = normalize_activity_detail(summary, laps, hr_zones, power_zones)
         detail.availability.extend(_zone_availability(hr_zones, power_zones))
         if self.database is not None:
-            if prior is not None and detail.summary.average_cadence is None:
+            if prior is not None:
+                # Garmin's detail read omits these list-only metrics; keep the listed values.
                 detail.summary = detail.summary.model_copy(
-                    update={"average_cadence": prior.summary.average_cadence}
+                    update={
+                        field: getattr(prior.summary, field)
+                        for field in ("average_cadence", "average_stride_length_m")
+                        if getattr(detail.summary, field) is None
+                    }
                 )
             self.database.put_activity_detail(detail)
         return detail.compact()
 
     def get_body_composition(
         self, start_date: str | None = None, end_date: str | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         start, end = parse_range(start_date, end_date)
         if self.database is not None:
             if not self.database.is_range_fresh("body_composition", start, end):
@@ -357,51 +428,33 @@ class GarminTools:
                         for key in ("dateWeightList", "dailyWeightSummaries", "weightList")
                     )
                 ):
-                    raise ValueError("Incomplete weigh-in response; cache was not changed")
+                    raise GarminOwlInputError("Incomplete weigh-in response; cache was not changed")
                 fetched_entries = normalize_body_composition(raw)
                 if any(item.timestamp is None for item in fetched_entries):
-                    raise ValueError("Incomplete weigh-in response; cache was not changed")
+                    raise GarminOwlInputError("Incomplete weigh-in response; cache was not changed")
                 self.database.replace_body_composition(start, end, fetched_entries)
-            return [item.compact() for item in self.database.get_body_composition(start, end)]
-        entries: list[BodyCompositionEntry] = normalize_body_composition(
-            self.client.body_composition(start, end)
-        )
-        return [entry.compact() for entry in entries]
+            entries = self.database.get_body_composition(start, end)
+        else:
+            entries = normalize_body_composition(self.client.body_composition(start, end))
+        return BodyCompositionList(
+            start_date=start, end_date=end, count=len(entries), entries=entries
+        ).compact()
 
     def get_recent_activities(
         self,
         days: int = 14,
         activity_type: str | None = None,
         limit: int = 20,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         if isinstance(days, bool) or not 1 <= days <= 90:
-            raise ValueError("days must be between 1 and 90")
+            raise GarminOwlInputError("days must be between 1 and 90")
         if isinstance(limit, bool) or not 1 <= limit <= MAX_ACTIVITIES:
-            raise ValueError(f"limit must be between 1 and {MAX_ACTIVITIES}")
+            raise GarminOwlInputError(f"limit must be between 1 and {MAX_ACTIVITIES}")
         if activity_type is not None and not activity_type.strip():
-            raise ValueError("activity_type cannot be blank")
+            raise GarminOwlInputError("activity_type cannot be blank")
         end = date.today()
         start = end - timedelta(days=days - 1)
-        if self.database is None or self.sync is None:
-            # Filter by type before applying the limit, or other types could crowd out matches.
-            fetch_limit = MAX_ACTIVITIES if activity_type else limit
-            items = normalize_activities(
-                self.client.activities(start.isoformat(), end.isoformat(), fetch_limit)
-            )
-            if activity_type:
-                items = [
-                    item
-                    for item in items
-                    if (item.activity_type or "").casefold() == activity_type.casefold()
-                ]
-            return [item.listing().compact() for item in items[:limit]]
-        self.sync.ensure_activities(start.isoformat(), end.isoformat())
-        return [
-            item.listing().compact()
-            for item in self.database.list_activities(
-                start.isoformat(), end.isoformat(), limit=limit, activity_type=activity_type
-            )
-        ]
+        return self._activity_list(start.isoformat(), end.isoformat(), limit, activity_type)
 
     def get_training_load(self, date: str | None = None) -> dict[str, Any]:
         cdate = parse_date(date).isoformat()
@@ -419,7 +472,7 @@ class GarminTools:
 
     def get_running_tolerance(self, days: int = 28, end_date: str | None = None) -> dict[str, Any]:
         if isinstance(days, bool) or not 1 <= days <= 90:
-            raise ValueError("days must be between 1 and 90")
+            raise GarminOwlInputError("days must be between 1 and 90")
         end = parse_date(end_date)
         start = end - timedelta(days=days - 1)
         try:
@@ -433,8 +486,8 @@ class GarminTools:
         ).compact()
 
     def _recovery_trend(self, days: int, end: date) -> RecoveryTrend:
-        if days not in {7, 14, 28} or isinstance(days, bool):
-            raise ValueError("days must be one of 7, 14, or 28")
+        if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= MAX_TREND_DAYS:
+            raise GarminOwlInputError(f"days must be between 1 and {MAX_TREND_DAYS}")
         start = end - timedelta(days=days - 1)
         requested = dates_between(start, end)
         if self.database is None or self.sync is None:
@@ -514,9 +567,14 @@ class GarminTools:
                     row["body_battery_charged"] = battery.charged
                 if row.get("body_battery_drained") is None:
                     row["body_battery_drained"] = battery.drained
+        unread_readiness: list[str] = []
+        readiness_failure: GarminOwlError | None = None
         for cdate in requested:
             row = by_date.setdefault(cdate, {"date": cdate})
             if row.get("training_readiness") is not None:
+                continue
+            if readiness_failure is not None:
+                unread_readiness.append(cdate)
                 continue
             # Go through the cache so each day is read from Garmin once, not on every trend
             # request; days whose readiness is already fresh (even if empty) cost nothing.
@@ -525,10 +583,30 @@ class GarminTools:
                     continue
             except GarminOwlMissingDataError:
                 continue
+            except (GarminOwlRateLimitError, GarminOwlUnavailableError) as exc:
+                # Readiness has no range read, so a long first window makes one read per day.
+                # Stop at the first rate limit or outage instead of discarding every other
+                # metric; days read so far stay cached, so asking again later continues here.
+                readiness_failure = exc
+                unread_readiness.append(cdate)
+                continue
             readiness = self.database.get_readiness(cdate)
             if readiness is not None:
                 row["training_readiness"] = readiness.score
-                row["recovery_time_minutes"] = readiness.recovery_time_minutes
+                row["recovery_time_hours"] = readiness.recovery_time_hours
+        if readiness_failure is not None:
+            status = _FAILURE_STATUS.get(type(readiness_failure), RETRIEVAL_FAILED)
+            availability.append(
+                AvailabilityNotice(
+                    field="training_readiness",
+                    status=status,
+                    message=(
+                        f"Training readiness was not retrieved for {len(unread_readiness)} "
+                        f"day(s) from {unread_readiness[0]} to {unread_readiness[-1]}: "
+                        f"{readiness_failure} Those values are unknown, not absent."
+                    ),
+                )
+            )
         point_fields = (
             "sleep_score",
             "nightly_avg_ms",
@@ -571,9 +649,9 @@ class GarminTools:
                 resting_hr_bpm=by_date[cdate].get("resting_hr_bpm"),
                 training_readiness=by_date[cdate].get("training_readiness"),
                 recovery_time_hours=(
-                    round(by_date[cdate]["recovery_time_minutes"] / 60, 1)
-                    if by_date[cdate].get("recovery_time_minutes") is not None
-                    else None
+                    by_date[cdate]["recovery_time_hours"]
+                    if "recovery_time_hours" in by_date[cdate]
+                    else hours_from_minutes(by_date[cdate].get("recovery_time_minutes"))
                 ),
                 body_battery_charged=by_date[cdate].get("body_battery_charged"),
                 body_battery_drained=by_date[cdate].get("body_battery_drained"),
@@ -711,7 +789,7 @@ class GarminTools:
         end = start + timedelta(days=6)
         items = [
             ActivitySummary(**item)
-            for item in self.get_activities(start.isoformat(), end.isoformat(), 100)
+            for item in self.get_activities(start.isoformat(), end.isoformat(), 100)["activities"]
         ]
         type_counts: dict[str, int] = {}
         for item in items:
@@ -798,9 +876,9 @@ class GarminTools:
 
     def compare_activities(self, activity_ids: list[int]) -> dict[str, Any]:
         if not 2 <= len(activity_ids) <= 10:
-            raise ValueError("activity_ids must contain between 2 and 10 IDs")
+            raise GarminOwlInputError("activity_ids must contain between 2 and 10 IDs")
         if len(set(activity_ids)) != len(activity_ids):
-            raise ValueError("activity_ids must be unique")
+            raise GarminOwlInputError("activity_ids must be unique")
         details = [
             ActivityDetail(**self.get_activity(validate_activity_id(item))) for item in activity_ids
         ]
@@ -863,7 +941,7 @@ class GarminTools:
             ),
             recent_activities=[
                 ActivitySummary(**item)
-                for item in self.get_activities(activity_start, cdate, MAX_ACTIVITIES)
+                for item in self.get_activities(activity_start, cdate, MAX_ACTIVITIES)["activities"]
             ],
             comparisons=comparisons,
             flags=flags,

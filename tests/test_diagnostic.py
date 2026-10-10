@@ -165,7 +165,10 @@ def test_key_probe_reports_a_failed_read_by_class_only() -> None:
 
     class FailingSleep(KeyProbeGarmin):
         def get_sleep_data(self, cdate: str) -> dict[str, Any]:
-            raise GarminConnectConnectionError("outage at 10.0.0.4")
+            try:
+                raise ConnectionRefusedError("outage at 10.0.0.4")
+            except ConnectionRefusedError as exc:
+                raise GarminConnectConnectionError("outage at 10.0.0.4") from exc
 
     observations = find_keys(
         GarminDataClient(FailingSleep()),  # type: ignore[arg-type]
@@ -174,5 +177,5 @@ def test_key_probe_reports_a_failed_read_by_class_only() -> None:
     )
     sleep = next(item for item in observations if item["endpoint"] == "sleep")
     assert sleep["status"] == "failed"
-    assert sleep["exception_class"] == "GarminOwlUnavailableError"
+    assert sleep["exception_class"] == "GarminOwlNetworkError"
     assert "10.0.0.4" not in json.dumps(observations)

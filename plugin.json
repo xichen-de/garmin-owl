@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "garmin-owl",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Local, read-only access to Garmin health and training data.",
   "author": { "name": "garmin-owl contributors" },
   "repository": "https://github.com/xichen-de/garmin-owl",

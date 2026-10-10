@@ -52,9 +52,7 @@ def unlabeled_status_notice(code: int) -> AvailabilityNotice:
 
 def body_battery_notice(status: str, cdate: str) -> AvailabilityNotice:
     messages = {
-        MISSING_OR_UNSUPPORTED: (
-            f"Garmin returned no Body Battery record for {cdate}."
-        ),
+        MISSING_OR_UNSUPPORTED: (f"Garmin returned no Body Battery record for {cdate}."),
         DATE_MISMATCH: (
             f"Garmin returned Body Battery records, but none for {cdate}; values from other "
             "dates were discarded rather than reported as this date's."

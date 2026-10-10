@@ -6,15 +6,17 @@ this database.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import sys
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time, timedelta
+from functools import wraps
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Concatenate, cast
 
 from .models import (
     SKIN_TEMPERATURE_BASIS,
@@ -33,6 +35,7 @@ from .models import (
     TrainingLoad,
     TrainingReadiness,
 )
+from .normalize import hours_from_minutes
 from .notices import (
     MISSING_OR_UNSUPPORTED,
     TRAINING_LOAD_SOURCES,
@@ -43,7 +46,12 @@ from .notices import (
     unlabeled_status_notice,
 )
 
-SCHEMA_VERSION = 7
+# Bump whenever stored values change meaning or format, and add a step to ``_migrate`` that
+# invalidates the affected rows. A cache is checked against this when opened and on every
+# transaction, so an update can never serve rows written in an older format.
+SCHEMA_VERSION = 9
+_STALE = "1970-01-01T00:00:00+00:00"
+_logger = logging.getLogger(__name__)
 TODAY_TTL = timedelta(minutes=20)
 # A calendar day keeps changing after midnight: watches and scales upload late, and Garmin
 # recomputes some daily aggregates. Treat a day as settled only at noon the following day, and
@@ -284,6 +292,49 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# Metrics an activity either measured or did not; Garmin's 0.0 means "not measured".
+_MEASURED_COLUMNS = {
+    "activities": (
+        "distance_m",
+        "average_speed_mps",
+        "average_moving_speed_mps",
+        "moving_duration_seconds",
+        "average_stride_length_m",
+        "average_cadence",
+        "max_cadence",
+        "average_power_w",
+        "max_power_w",
+        "normalized_power_w",
+    ),
+    "activity_laps": ("distance_m", "average_cadence", "average_power_w"),
+}
+_ONE_DECIMAL_COLUMNS = {
+    "sleep": (
+        "respiration_avg",
+        "respiration_min",
+        "respiration_max",
+        "spo2_avg",
+        "spo2_min",
+        "average_hr_bpm",
+        "average_stress",
+    ),
+    "daily_metrics": (
+        "average_waking_respiration",
+        "highest_respiration",
+        "lowest_respiration",
+        "average_spo2_percent",
+        "lowest_spo2_percent",
+    ),
+    "activities": (
+        "average_respiration",
+        "lowest_respiration",
+        "highest_respiration",
+        "average_hr_bpm",
+        "max_hr_bpm",
+    ),
+}
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -294,6 +345,49 @@ def _timestamp(now: datetime | None = None) -> str:
 
 def _activity_date(item: ActivitySummary) -> str | None:
     return item.start_time[:10] if item.start_time and len(item.start_time) >= 10 else None
+
+
+class GarminOwlCacheError(RuntimeError):
+    """A cache configuration error whose message is safe to show to callers."""
+
+
+def _discard_unreadable[**P, R](
+    table: str, key: str, *, keyed: tuple[str, ...] = (), ranged: tuple[str, ...] = ()
+) -> Callable[
+    [Callable[Concatenate[GarminDatabase, Any, P], R | None]],
+    Callable[Concatenate[GarminDatabase, Any, P], R | None],
+]:
+    """Treat a stored row that no longer fits its model as a cache miss, never a failure.
+
+    The row is deleted together with its freshness record, so the next read fetches it from
+    Garmin again instead of failing on every call until the cache is cleared by hand.
+    """
+
+    def decorator(
+        read: Callable[Concatenate[GarminDatabase, Any, P], R | None],
+    ) -> Callable[Concatenate[GarminDatabase, Any, P], R | None]:
+        @wraps(read)
+        def wrapper(
+            self: GarminDatabase, value: Any, /, *args: P.args, **kwargs: P.kwargs
+        ) -> R | None:
+            try:
+                return read(self, value, *args, **kwargs)
+            except (KeyError, TypeError, ValueError):  # pydantic ValidationError is a ValueError
+                _logger.warning("Discarding an unreadable cached %s row", table)
+                with self.connect() as connection:
+                    connection.execute(f"DELETE FROM {table} WHERE {key}=?", (value,))
+                    for resource in keyed:
+                        connection.execute(
+                            "DELETE FROM sync_state WHERE resource=? AND key=?",
+                            (resource, str(value)),
+                        )
+                    for resource in ranged:
+                        connection.execute("DELETE FROM sync_state WHERE resource=?", (resource,))
+                return None
+
+        return wrapper
+
+    return decorator
 
 
 class GarminDatabase:
@@ -308,10 +402,48 @@ class GarminDatabase:
         # MCP runs synchronous tools on worker threads, so access is serialized by a lock.
         self._lock = threading.RLock()
         self._transaction_depth = 0
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA foreign_keys = ON")
+        self._initializing = False
+        self._connection = self._open()
+        if self._stored_version() > SCHEMA_VERSION:
+            self._set_aside_newer_cache()
         self.initialize()
+
+    def _open(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    def _stored_version(self) -> int:
+        return int(self._connection.execute("PRAGMA user_version").fetchone()[0])
+
+    def _set_aside_newer_cache(self) -> None:
+        """Keep a cache written by a newer garmin-owl intact and start a fresh one.
+
+        This version cannot interpret the newer layout, and failing every read until the user
+        clears the cache by hand is worse than re-fetching from Garmin. The newer file is
+        renamed rather than deleted, so returning to the newer version loses nothing.
+        """
+        version = self._stored_version()
+        self._connection.close()
+        target = self.path.with_name(f"{self.path.name}.schema-{version}")
+        suffix = 1
+        while target.exists():
+            suffix += 1
+            target = self.path.with_name(f"{self.path.name}.schema-{version}.{suffix}")
+        self.path.rename(target)
+        for extra in ("-journal", "-wal", "-shm"):
+            sidecar = self.path.with_name(self.path.name + extra)
+            if sidecar.exists():
+                sidecar.rename(target.with_name(target.name + extra))
+        _logger.warning(
+            "garmin-owl cache schema %d is newer than this version supports (%d); "
+            "kept it as %s and started a new cache.",
+            version,
+            SCHEMA_VERSION,
+            target,
+        )
+        self._connection = self._open()
 
     def close(self) -> None:
         with self._lock:
@@ -324,6 +456,8 @@ class GarminDatabase:
             outermost = self._transaction_depth == 0
             self._transaction_depth += 1
             try:
+                if outermost and not self._initializing:
+                    self._check_version()
                 yield self._connection
                 if outermost:
                     self._connection.commit()
@@ -334,30 +468,50 @@ class GarminDatabase:
             finally:
                 self._transaction_depth -= 1
 
+    def _check_version(self) -> None:
+        """Re-check the stored layout on every transaction, not only when the cache opens.
+
+        Another garmin-owl process (an update, garmin-owl-sync, garmin-owl-cache-clear) can
+        change the file while this server keeps running.
+        """
+        version = self._stored_version()
+        if version == SCHEMA_VERSION:
+            return
+        if version > SCHEMA_VERSION:
+            raise GarminOwlCacheError(
+                f"The local cache was upgraded to schema {version} by a newer garmin-owl while "
+                f"this one (schema {SCHEMA_VERSION}) was running. Restart the app to use the "
+                "newer version."
+            )
+        self.initialize()
+
     def bind_account(self, fingerprint: str) -> None:
-        """Fail closed for another account or legacy data of unknown ownership."""
+        """Bind the cache to one account; never serve rows cached for another.
+
+        Rows of unknown ownership come from caches written before accounts were recorded.
+        They cannot be attributed safely, so they are discarded and re-fetched for the
+        signed-in account instead of blocking every read until the user clears them by hand.
+        """
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             owner = connection.execute("SELECT fingerprint FROM cache_owner WHERE id=1").fetchone()
             if owner is not None:
                 if owner[0] != fingerprint:
-                    raise RuntimeError(
+                    raise GarminOwlCacheError(
                         "Cache belongs to another Garmin account. Use a separate GARMIN_OWL_DB."
                     )
                 return
             tables = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name != 'cache_owner'"
             ).fetchall()
+            names = ['"' + str(row[0]).replace('"', '""') + '"' for row in tables]
             if any(
-                connection.execute(
-                    'SELECT 1 FROM "' + str(row[0]).replace('"', '""') + '" LIMIT 1'
-                ).fetchone()
-                for row in tables
+                connection.execute(f"SELECT 1 FROM {name} LIMIT 1").fetchone() for name in names
             ):
-                raise RuntimeError(
-                    "Cache ownership is unknown. Clear it with garmin-owl-cache-clear "
-                    "or use a new GARMIN_OWL_DB before reading Garmin data."
-                )
+                _logger.warning("Discarding cached Garmin rows of unknown account ownership")
+                # Children first, so foreign keys never see an orphaned row.
+                for name in sorted(names, key=lambda name: not name.startswith('"activity_')):
+                    connection.execute(f"DELETE FROM {name}")
             connection.execute("INSERT INTO cache_owner VALUES(1,?)", (fingerprint,))
 
     def replace_activities(self, start: str, end: str, items: list[ActivitySummary]) -> None:
@@ -389,52 +543,101 @@ class GarminDatabase:
             self.mark_synced("body_composition", f"{start}:{end}")
 
     def initialize(self) -> None:
-        with self.connect() as connection:
-            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version > SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"Unsupported garmin-owl cache schema {version}; expected {SCHEMA_VERSION}."
-                )
-            connection.executescript(SCHEMA)
-            existing: dict[str, set[str]] = {}
-            for table, column, column_type in ADDED_COLUMNS:
-                if table not in existing:
-                    existing[table] = {
-                        str(row["name"])
-                        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-                    }
-                if column not in existing[table]:
-                    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
-                    existing[table].add(column)
-            if version < 5:
-                # Version 5 exposes additional scalars from reads that older rows already
-                # claimed were complete. Preserve the normalized cache, but make those rows
-                # stale once so the next relevant read can populate the new fields.
-                old_stamp = "1970-01-01T00:00:00+00:00"
-                connection.execute("UPDATE daily_metrics SET fetched_at=?", (old_stamp,))
-                connection.execute("UPDATE sleep SET fetched_at=?", (old_stamp,))
-                connection.execute(
-                    "UPDATE activities SET fetched_at=?, detail_fetched_at=NULL", (old_stamp,)
-                )
-                connection.execute(
-                    "DELETE FROM sync_state WHERE resource IN "
-                    "('activities','training_load','readiness')"
-                )
-            if version < 6:
-                # Version 6 stores the user's activity notes and ratings. Rows cached earlier
-                # never captured them, so re-read each activity's detail and each activity list
-                # once. Backdating rather than clearing the detail stamp keeps weekly detail
-                # coverage intact.
-                connection.execute(
-                    "UPDATE activities SET detail_fetched_at=? WHERE detail_fetched_at IS NOT NULL",
-                    ("1970-01-01T00:00:00+00:00",),
-                )
-                connection.execute("DELETE FROM sync_state WHERE resource='activities'")
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self._initializing = True
+        try:
+            with self.connect() as connection:
+                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                if version > SCHEMA_VERSION:
+                    raise GarminOwlCacheError(
+                        f"Unsupported garmin-owl cache schema {version}; expected "
+                        f"{SCHEMA_VERSION}. Update garmin-owl."
+                    )
+                self._migrate(connection, version)
+        finally:
+            self._initializing = False
         try:
             self.path.chmod(0o600)
         except OSError:
             pass
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection, version: int) -> None:
+        # Idempotent: also restores any table or column missing from a current-version file.
+        connection.executescript(SCHEMA)
+        existing: dict[str, set[str]] = {}
+        for table, column, column_type in ADDED_COLUMNS:
+            if table not in existing:
+                existing[table] = {
+                    str(row["name"])
+                    for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+            if column not in existing[table]:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+                existing[table].add(column)
+        if version < 5:
+            # Version 5 exposes additional scalars from reads that older rows already
+            # claimed were complete. Preserve the normalized cache, but make those rows
+            # stale once so the next relevant read can populate the new fields.
+            old_stamp = "1970-01-01T00:00:00+00:00"
+            connection.execute("UPDATE daily_metrics SET fetched_at=?", (old_stamp,))
+            connection.execute("UPDATE sleep SET fetched_at=?", (old_stamp,))
+            connection.execute(
+                "UPDATE activities SET fetched_at=?, detail_fetched_at=NULL", (old_stamp,)
+            )
+            connection.execute(
+                "DELETE FROM sync_state WHERE resource IN "
+                "('activities','training_load','readiness')"
+            )
+        if version < 6:
+            # Version 6 stores the user's activity notes and ratings. Rows cached earlier
+            # never captured them, so re-read each activity's detail and each activity list
+            # once. Backdating rather than clearing the detail stamp keeps weekly detail
+            # coverage intact.
+            connection.execute(
+                "UPDATE activities SET detail_fetched_at=? WHERE detail_fetched_at IS NOT NULL",
+                ("1970-01-01T00:00:00+00:00",),
+            )
+            connection.execute("DELETE FROM sync_state WHERE resource='activities'")
+        if version < 8:
+            # Version 8 stores every timestamp as ISO 8601 with an explicit offset, built
+            # from Garmin's GMT value. Older rows held Garmin's local wall time encoded as
+            # if it were UTC (sleep) or offset-less strings, which callers misread by the
+            # user's UTC offset. Drop the ambiguous values and make the rows stale so the
+            # next read re-fetches them. Weigh-ins are keyed by timestamp, so re-read them.
+            connection.execute(
+                "UPDATE sleep SET sleep_start=NULL, sleep_end=NULL, fetched_at=?", (_STALE,)
+            )
+            connection.execute("UPDATE daily_metrics SET readiness_timestamp=NULL")
+            connection.execute(
+                "UPDATE activities SET fetched_at=:stale, detail_fetched_at="
+                "CASE WHEN detail_fetched_at IS NULL THEN NULL ELSE :stale END",
+                {"stale": _STALE},
+            )
+            connection.execute("DELETE FROM body_composition")
+            connection.execute(
+                "DELETE FROM sync_state WHERE resource IN "
+                "('activities','readiness','body_composition')"
+            )
+        if version < 9:
+            # Version 9 corrects values in place; nothing needs re-fetching. Stride length was
+            # stored in Garmin's centimetres, Garmin's 0.0 for unmeasured activity metrics was
+            # kept as a measured zero, and float32 noise (26.940000534057617) and -0.0 were
+            # stored unrounded.
+            connection.execute(
+                "UPDATE activities SET average_stride_length_m=average_stride_length_m/100.0 "
+                "WHERE average_stride_length_m IS NOT NULL"
+            )
+            for table, columns in _MEASURED_COLUMNS.items():
+                for column in columns:
+                    connection.execute(f"UPDATE {table} SET {column}=NULL WHERE {column}<=0")
+            for table, columns in _ONE_DECIMAL_COLUMNS.items():
+                for column in columns:
+                    connection.execute(f"UPDATE {table} SET {column}=ROUND({column},1)+0.0")
+            connection.execute(
+                "UPDATE sleep SET skin_temperature_deviation_c=0.0 "
+                "WHERE skin_temperature_deviation_c=0"
+            )
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def _upsert(
         self,
@@ -590,7 +793,11 @@ class GarminDatabase:
                 "readiness_level": readiness.level if readiness else None,
                 "readiness_feedback": readiness.feedback if readiness else None,
                 "readiness_timestamp": readiness.timestamp if readiness else None,
-                "recovery_time_minutes": readiness.recovery_time_minutes if readiness else None,
+                "recovery_time_minutes": (
+                    round(readiness.recovery_time_hours * 60)
+                    if readiness and readiness.recovery_time_hours is not None
+                    else None
+                ),
                 "readiness_sleep_score": readiness.sleep_score if readiness else None,
                 "readiness_hrv_factor_percent": (
                     readiness.hrv_factor_percent if readiness else None
@@ -629,10 +836,12 @@ class GarminDatabase:
             },
         )
 
+    @_discard_unreadable("daily_metrics", "date", keyed=("readiness",))
     def get_daily(self, cdate: str) -> DailySummary | None:
         row = self._row("daily_metrics", "date", cdate)
         return DailySummary(**dict(row)) if row else None
 
+    @_discard_unreadable("daily_metrics", "date", keyed=("readiness",))
     def get_readiness(self, cdate: str) -> TrainingReadiness | None:
         row = self._row("daily_metrics", "date", cdate)
         if not row:
@@ -643,7 +852,7 @@ class GarminDatabase:
             level=row["readiness_level"],
             feedback=row["readiness_feedback"],
             timestamp=row["readiness_timestamp"],
-            recovery_time_minutes=row["recovery_time_minutes"],
+            recovery_time_hours=hours_from_minutes(row["recovery_time_minutes"]),
             sleep_score=row["readiness_sleep_score"],
             hrv_factor_percent=row["readiness_hrv_factor_percent"],
             acute_load_factor_percent=row["readiness_acute_load_factor_percent"],
@@ -694,6 +903,7 @@ class GarminDatabase:
             },
         )
 
+    @_discard_unreadable("sleep", "date")
     def get_sleep(self, cdate: str) -> SleepSummary | None:
         row = self._row("sleep", "date", cdate)
         if not row:
@@ -728,6 +938,7 @@ class GarminDatabase:
             },
         )
 
+    @_discard_unreadable("hrv", "date")
     def get_hrv(self, cdate: str) -> HrvSummary | None:
         row = self._row("hrv", "date", cdate)
         if not row:
@@ -762,6 +973,7 @@ class GarminDatabase:
             },
         )
 
+    @_discard_unreadable("training_status", "date", keyed=("training_load",))
     def get_training_load(self, cdate: str) -> TrainingLoad | None:
         row = self._row("training_status", "date", cdate)
         if not row:
@@ -797,6 +1009,7 @@ class GarminDatabase:
             },
         )
 
+    @_discard_unreadable("body_battery", "date")
     def get_body_battery(self, cdate: str) -> BodyBatterySummary | None:
         row = self._row("body_battery", "date", cdate)
         if not row:
@@ -818,6 +1031,7 @@ class GarminDatabase:
             },
         )
 
+    @_discard_unreadable("stress", "date")
     def get_stress(self, cdate: str) -> StressSummary | None:
         row = self._row("stress", "date", cdate)
         return StressSummary(**dict(row)) if row else None
@@ -945,6 +1159,7 @@ class GarminDatabase:
                 )
         return inserted
 
+    @_discard_unreadable("activities", "activity_id", ranged=("activities",))
     def get_activity(
         self,
         activity_id: int,
@@ -1165,6 +1380,7 @@ class GarminDatabase:
             },
         )
 
+    @_discard_unreadable("cycle_metrics", "date")
     def get_cycle(self, cdate: str) -> CycleSummary | None:
         row = self._row("cycle_metrics", "date", cdate)
         if not row:
