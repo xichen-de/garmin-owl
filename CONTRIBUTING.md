@@ -99,7 +99,7 @@ These are the project's guarantees to users. A change that breaks one of them ne
 1. **Client:** if the tool needs a new Garmin read, add the method to `GarminReadAPI` and a wrapper to `GarminDataClient` that goes through `self._read(...)`.
 2. **Normalize and model:** add a normalizer and a model that inherits `OwlModel`.
 3. **Service:** add a method to `GarminTools` that validates input (`parse_date`, `parse_range`, bounds), uses the cache if the data is cacheable, and returns `.compact()`.
-4. **Register:** add a thin function in `server.py`. Its docstring is the description the model sees, so state limits and units there.
+4. **Register:** add a thin function in `server.py`. Its docstring is the description the model sees: explain when to choose it over related tools, relevant limits, authentication, and cache behavior. Add `Annotated`/`Field` descriptions for every parameter and the shared read-only tool annotations. `tests/test_server.py` checks the exported MCP metadata without authenticating.
 5. **Declare:** add the tool to the `tools` list in `manifest.json` and to the expected set in `tests/test_server.py`. If you created a new module, add it to `PACKAGE_FILES` in `scripts/build-chatgpt-plugin.py`.
 6. **Document:** add a row to the tool tables and, if relevant, the date-limit table in `README.md`.
 
