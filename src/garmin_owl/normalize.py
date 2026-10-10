@@ -40,6 +40,8 @@ from .notices import (
 )
 
 MAX_TIMESERIES_POINTS = 48
+# Garmin Connect's five "How did you feel?" choices, stored as 0-100 in steps of 25.
+WORKOUT_FEEL_LABELS = {0: "very weak", 25: "weak", 50: "normal", 75: "strong", 100: "very strong"}
 MAX_ACTIVITY_LAPS = 200
 
 
@@ -80,6 +82,22 @@ def _integer(value: Any) -> int | None:
 
 def _text(value: Any) -> str | None:
     return str(value) if value not in (None, "") else None
+
+
+def _perceived_effort(value: Any) -> float | None:
+    """Garmin stores RPE 1-10 multiplied by ten; anything off that scale is not reported."""
+    number = _number(value)
+    return round(number / 10, 1) if number is not None and 10 <= number <= 100 else None
+
+
+def _workout_feel(value: Any) -> str | None:
+    code = _integer(value)
+    return WORKOUT_FEEL_LABELS.get(code) if code is not None else None
+
+
+def _note(value: Any) -> str | None:
+    """Return user-written text exactly as entered; blank or non-text values mean no note."""
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def _nested(data: Mapping[str, Any], *path: str) -> Mapping[str, Any]:
@@ -410,6 +428,12 @@ def normalize_activity(raw: Any) -> ActivitySummary:
             if (seconds := _number(data.get(f"hrTimeInZone_{zone}"))) is not None
         }
         or None,
+        # Both the activity list and get_activity carry the note as a root ``description``
+        # string and omit the key entirely when the activity has none.
+        description=_note(data.get("description")),
+        # Only get_activity carries the ratings (in summaryDTO); the activity list omits them.
+        perceived_effort=_perceived_effort(data.get("directWorkoutRpe")),
+        feel=_workout_feel(data.get("directWorkoutFeel")),
     )
 
 

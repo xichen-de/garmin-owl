@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 import pytest
 
@@ -6,6 +7,7 @@ from garmin_owl.normalize import (
     MAX_TIMESERIES_POINTS,
     decimate_points,
     normalize_activities,
+    normalize_activity,
     normalize_activity_detail,
     normalize_body_battery,
     normalize_body_composition,
@@ -518,3 +520,70 @@ def test_garmin_supplied_wording_wins_and_clears_the_code_warning() -> None:
     assert result["training_status"] == "UNPRODUCTIVE_1"
     assert result["training_status_code"] == 7
     assert "availability" not in result
+
+
+# Real notes mix symbols, emoji, and non-English text; all must survive untouched.
+NOTE = "Pull-ups: 5x5, red band\nGrip fatigue: 8/10\nThrusters 43 kg × 21-15-9 🔥 Übung"  # noqa: RUF001
+
+
+def test_activity_detail_keeps_the_root_description_verbatim() -> None:
+    # Garmin puts the note at the root of get_activity, beside the name, not in summaryDTO.
+    detail = normalize_activity_detail(
+        {
+            "activityId": 9,
+            "activityName": "CrossFit",
+            "description": NOTE,
+            "summaryDTO": {"duration": 3600},
+        }
+    )
+    assert detail.summary.description == NOTE
+    assert detail.compact()["summary"]["description"] == NOTE
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {},
+        {"description": None},
+        {"description": ""},
+        {"description": " \n"},
+        {"description": {"text": "x"}},
+    ],
+)
+def test_missing_blank_or_malformed_description_is_absent(raw: dict[str, Any]) -> None:
+    summary = normalize_activity({"activityId": 9, **raw})
+    assert summary.description is None
+    assert "description" not in summary.compact()
+
+
+def test_activity_list_marks_notes_without_repeating_them() -> None:
+    first, second = normalize_activities(
+        [{"activityId": 1, "description": NOTE}, {"activityId": 2}]
+    )
+    assert first.description == NOTE
+    assert first.listing().compact() == {"activity_id": 1, "has_description": True}
+    assert second.listing().compact() == {"activity_id": 2}
+
+
+def test_detail_reads_the_users_effort_and_feel_from_summary_dto() -> None:
+    # Observed live: integers in summaryDTO, RPE times ten and feel in steps of 25.
+    detail = normalize_activity_detail(
+        {"activityId": 9, "summaryDTO": {"directWorkoutRpe": 40, "directWorkoutFeel": 50}}
+    )
+    assert detail.summary.perceived_effort == 4
+    assert detail.summary.feel == "normal"
+
+
+@pytest.mark.parametrize(
+    ("rpe", "feel"), [(None, None), (0, 10), (110, 60), ("x", True), (True, "strong")]
+)
+def test_missing_or_off_scale_ratings_are_absent(rpe: Any, feel: Any) -> None:
+    summary = normalize_activity(
+        {"activityId": 9, "directWorkoutRpe": rpe, "directWorkoutFeel": feel}
+    )
+    assert summary.perceived_effort is None and summary.feel is None
+
+
+def test_activity_list_never_shows_ratings() -> None:
+    summary = normalize_activity({"activityId": 1, "directWorkoutRpe": 70})
+    assert summary.listing().compact() == {"activity_id": 1}

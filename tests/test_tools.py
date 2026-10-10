@@ -709,3 +709,117 @@ def test_trend_reads_missing_readiness_from_garmin_only_once(tmp_path: Path) -> 
     assert readiness_reads == 7
     assert fake.calls.count("get_training_readiness") == readiness_reads
     assert first["points"][-1]["training_readiness"] == 75
+
+
+class NotesGarmin(FakeGarmin):
+    """Garmin omits ``description`` entirely when an activity has no note."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.note: str | None = "Pull-ups: 5x5, red band\nGrip fatigue: 8/10 · Übung 💪"
+        self.ratings: dict[str, int] = {"directWorkoutRpe": 40, "directWorkoutFeel": 50}
+
+    def _with_note(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {**item, "description": self.note} if self.note is not None else item
+
+    def get_activities_by_date(
+        self, startdate: str, enddate: str | None = None
+    ) -> list[dict[str, Any]]:
+        item = {
+            "activityId": 1,
+            "activityName": "CrossFit",
+            "startTimeLocal": "2026-08-20 18:00:00",
+        }
+        return self._record(
+            "get_activities_by_date",
+            [
+                self._with_note(item),
+                {"activityId": 2, "activityName": "Run", "startTimeLocal": "2026-08-20 07:00:00"},
+            ],
+        )
+
+    def get_activity(self, activity_id: str) -> dict[str, Any]:
+        item = {
+            "activityId": int(activity_id),
+            "activityName": "CrossFit",
+            "startTimeLocal": "2026-08-20 18:00:00",
+            "summaryDTO": {"duration": 3600.0, **self.ratings},
+        }
+        return self._record("get_activity", self._with_note(item))
+
+
+def test_activity_note_is_identical_live_and_cached(tmp_path: Path) -> None:
+    fake = NotesGarmin()
+    live = GarminTools(_client(fake)).get_activity(1)
+    assert live["summary"]["description"] == fake.note
+    cached_tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
+    assert cached_tools.get_activity(1) == live
+    calls = len(fake.calls)
+    assert cached_tools.get_activity(1) == live
+    assert len(fake.calls) == calls
+
+
+def test_activity_without_note_has_no_description_key(tmp_path: Path) -> None:
+    fake = NotesGarmin()
+    fake.note = None
+    tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
+    assert "description" not in tools.get_activity(1)["summary"]
+    assert "description" not in GarminTools(_client(fake)).get_activity(1)["summary"]
+
+
+def test_activity_lists_only_flag_notes_live_and_cached(tmp_path: Path) -> None:
+    fake = NotesGarmin()
+    expected = [
+        {
+            "activity_id": 1,
+            "name": "CrossFit",
+            "start_time": "2026-08-20 18:00:00",
+            "has_description": True,
+        },
+        {"activity_id": 2, "name": "Run", "start_time": "2026-08-20 07:00:00"},
+    ]
+    live = GarminTools(_client(fake)).get_activities("2026-08-20", "2026-08-20")
+    cached = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
+    assert live == expected
+    assert cached.get_activities("2026-08-20", "2026-08-20") == expected
+
+
+def test_refresh_picks_up_a_note_edited_after_the_detail_was_cached(tmp_path: Path) -> None:
+    fake = NotesGarmin()
+    tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
+    first = tools.get_activity(1)
+    fake.note = "Edited later: grip 6/10"
+    # Without refresh the settled detail is served from the cache, unchanged.
+    assert tools.get_activity(1) == first
+    assert tools.get_activity(1, refresh=True)["summary"]["description"] == fake.note
+    assert tools.get_activity(1)["summary"]["description"] == fake.note
+    # Deleting the note in Garmin Connect clears it on the next refresh too.
+    fake.note = None
+    assert "description" not in tools.get_activity(1, refresh=True)["summary"]
+    assert "description" not in tools.get_activity(1)["summary"]
+
+
+def test_activity_list_sync_updates_a_cached_note_without_a_detail_read(tmp_path: Path) -> None:
+    fake = NotesGarmin()
+    tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
+    tools.get_activity(1)
+    fake.note = "Edited later"
+    tools.sync.ensure_activities("2026-08-20", "2026-08-20", force=True)  # type: ignore[union-attr]
+    detail_calls = fake.calls.count("get_activity")
+    assert tools.get_activity(1)["summary"]["description"] == "Edited later"
+    assert fake.calls.count("get_activity") == detail_calls
+
+
+def test_ratings_match_live_and_cached_and_stay_out_of_lists(tmp_path: Path) -> None:
+    fake = NotesGarmin()
+    live = GarminTools(_client(fake)).get_activity(1)
+    assert (live["summary"]["perceived_effort"], live["summary"]["feel"]) == (4, "normal")
+    tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
+    assert tools.get_activity(1) == live
+    assert tools.get_activity(1) == live
+    listed = tools.get_activities("2026-08-20", "2026-08-20")
+    assert all("perceived_effort" not in item and "feel" not in item for item in listed)
+    # A rating changed later is picked up by an explicit refresh.
+    fake.ratings = {"directWorkoutRpe": 80, "directWorkoutFeel": 75}
+    refreshed = tools.get_activity(1, refresh=True)["summary"]
+    assert (refreshed["perceived_effort"], refreshed["feel"]) == (8, "strong")

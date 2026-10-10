@@ -43,7 +43,7 @@ from .notices import (
     unlabeled_status_notice,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 TODAY_TTL = timedelta(minutes=20)
 # A calendar day keeps changing after midnight: watches and scales upload late, and Garmin
 # recomputes some daily aggregates. Treat a day as settled only at noon the following day, and
@@ -137,7 +137,8 @@ CREATE TABLE IF NOT EXISTS activities (
   average_respiration REAL, lowest_respiration REAL, highest_respiration REAL,
   max_cadence REAL, max_power_w REAL, normalized_power_w REAL,
   training_stress_score REAL, intensity_factor REAL, activity_training_load REAL,
-  vo2_max REAL, moderate_intensity_minutes INTEGER, vigorous_intensity_minutes INTEGER
+  vo2_max REAL, moderate_intensity_minutes INTEGER, vigorous_intensity_minutes INTEGER,
+  description TEXT, perceived_effort REAL, feel TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_activities_date ON activities(date);
 CREATE TABLE IF NOT EXISTS activity_laps (
@@ -272,6 +273,9 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
             ("vo2_max", "REAL"),
             ("moderate_intensity_minutes", "INTEGER"),
             ("vigorous_intensity_minutes", "INTEGER"),
+            ("description", "TEXT"),
+            ("perceived_effort", "REAL"),
+            ("feel", "TEXT"),
         )
     ),
 )
@@ -352,6 +356,16 @@ class GarminDatabase:
                     "DELETE FROM sync_state WHERE resource IN "
                     "('activities','training_load','readiness')"
                 )
+            if version < 6:
+                # Version 6 stores the user's activity notes and ratings. Rows cached earlier
+                # never captured them, so re-read each activity's detail and each activity list
+                # once. Backdating rather than clearing the detail stamp keeps weekly detail
+                # coverage intact.
+                connection.execute(
+                    "UPDATE activities SET detail_fetched_at=? WHERE detail_fetched_at IS NOT NULL",
+                    ("1970-01-01T00:00:00+00:00",),
+                )
+                connection.execute("DELETE FROM sync_state WHERE resource='activities'")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         try:
             self.path.chmod(0o600)
@@ -751,6 +765,7 @@ class GarminDatabase:
                 "aerobic_training_effect",
                 "anaerobic_training_effect",
                 "training_effect_label",
+                "has_description",
             }
         )
         values.update(
@@ -798,10 +813,14 @@ class GarminDatabase:
         inserted = self.put_activity_summary(item.summary, now=now)
         stamp = _timestamp(now)
         with self.connect() as connection:
+            # The summary upsert keeps a stored note or rating when a read omits it, so a list
+            # read that lacks them can never erase them. The detail read is authoritative, which
+            # is how a note or rating removed in Garmin Connect disappears here too.
             connection.execute(
                 "UPDATE activities SET aerobic_training_effect=?, anaerobic_training_effect=?, "
                 "training_effect_label=?, detail_fetched_at=?, hr_zones_status=?, "
-                "power_zones_status=? WHERE activity_id=?",
+                "power_zones_status=?, description=?, perceived_effort=?, feel=? "
+                "WHERE activity_id=?",
                 (
                     item.training_effect_aerobic,
                     item.training_effect_anaerobic,
@@ -823,6 +842,9 @@ class GarminDatabase:
                         ),
                         "available",
                     ),
+                    item.summary.description,
+                    item.summary.perceived_effort,
+                    item.summary.feel,
                     item.summary.activity_id,
                 ),
             )
@@ -895,7 +917,8 @@ class GarminDatabase:
                 "hr_zones_seconds": None,
             }
         )
-        total = sum(zones.values()) or None
+        # Rounded exactly as normalize_activity_detail does, so cache hits match live reads.
+        total = round(sum(zones.values()), 2) or None
         coverage = (
             round(total / summary.duration_seconds * 100, 1)
             if total is not None and summary.duration_seconds

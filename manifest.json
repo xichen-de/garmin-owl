@@ -57,7 +57,7 @@
     },
     {
       "name": "get_activity",
-      "description": "Read details for one Garmin activity without location tracks or raw streams."
+      "description": "Read details for one Garmin activity, including the user's own notes and effort ratings, without location tracks or raw streams."
     },
     {
       "name": "get_body_composition",
