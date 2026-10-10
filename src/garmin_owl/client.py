@@ -111,7 +111,7 @@ class GarminDataClient:
                 raise GarminOwlAuthError("Cannot establish Garmin account identity for the cache.")
             # Reads must use the same authenticated profile as the cache binding, even
             # when the local session sidecar still describes a previous sign-in.
-            self.__api.display_name = identity  # type: ignore[attr-defined]
+            self.__api.display_name = identity  # type: ignore[union-attr]
             self.cache_identity = hashlib.sha256(identity.encode()).hexdigest()
 
     def _read[T](self, endpoint: str, call: Callable[[], T]) -> T:
