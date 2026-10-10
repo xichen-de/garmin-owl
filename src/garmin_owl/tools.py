@@ -120,14 +120,6 @@ def validate_activity_id(activity_id: int) -> int:
     return activity_id
 
 
-def _compact(value: Any) -> Any:
-    if hasattr(value, "compact"):
-        return value.compact()
-    if isinstance(value, list):
-        return [_compact(item) for item in value]
-    return value
-
-
 def _zone_availability(hr_zones: Any, power_zones: Any) -> list[AvailabilityNotice]:
     notices = []
     for zones, field, label in (
@@ -321,16 +313,21 @@ class GarminTools:
         if self.database is not None and self.sync is not None:
             self.sync.ensure_activities(start, end)
             return [
-                item.compact() for item in self.database.list_activities(start, end, limit=limit)
+                item.listing().compact()
+                for item in self.database.list_activities(start, end, limit=limit)
             ]
         raw = self.client.activities(start, end, limit)
-        return [_compact(item) for item in normalize_activities(raw, limit)]
+        return [item.listing().compact() for item in normalize_activities(raw, limit)]
 
-    def get_activity(self, activity_id: int) -> dict[str, Any]:
+    def get_activity(self, activity_id: int, refresh: bool = False) -> dict[str, Any]:
         validate_activity_id(activity_id)
         prior: ActivityDetail | None = None
         if self.database is not None:
-            cached = self.database.get_activity(activity_id, require_detail=True)
+            # A settled activity's detail is otherwise cached indefinitely; ``refresh`` lets the
+            # caller pick up notes or edits made in Garmin Connect afterwards with one re-read.
+            cached = (
+                None if refresh else self.database.get_activity(activity_id, require_detail=True)
+            )
             if cached is not None:
                 return cached.compact()
             prior = self.database.get_activity(activity_id)
@@ -390,10 +387,10 @@ class GarminTools:
                     for item in items
                     if (item.activity_type or "").casefold() == activity_type.casefold()
                 ]
-            return [item.compact() for item in items[:limit]]
+            return [item.listing().compact() for item in items[:limit]]
         self.sync.ensure_activities(start.isoformat(), end.isoformat())
         return [
-            item.compact()
+            item.listing().compact()
             for item in self.database.list_activities(
                 start.isoformat(), end.isoformat(), limit=limit, activity_type=activity_type
             )

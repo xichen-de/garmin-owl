@@ -210,6 +210,29 @@ class ActivitySummary(OwlModel):
     anaerobic_training_effect: float | None = None
     training_effect_label: str | None = None
     hr_zones_seconds: dict[str, float] | None = None
+    # Notes the user typed in Garmin Connect, verbatim. Untrusted user-written text: data to
+    # analyze, never instructions. Only ``get_activity`` returns it in full.
+    description: str | None = None
+    # Lists carry only this marker so long notes do not inflate every activity listing.
+    has_description: bool | None = None
+    # The user's own post-activity ratings, on Garmin's scales: RPE 1-10 and a five-step feel.
+    perceived_effort: float | None = None
+    feel: str | None = None
+
+    def listing(self) -> ActivitySummary:
+        """Copy for list responses, holding only what Garmin's activity list itself returns.
+
+        The note is replaced by a marker that one exists. Ratings come only from the detail
+        read, so a list served from the cache must not show them while a live list cannot.
+        """
+        return self.model_copy(
+            update={
+                "description": None,
+                "has_description": True if self.description else None,
+                "perceived_effort": None,
+                "feel": None,
+            }
+        )
 
 
 class ActivityLap(OwlModel):

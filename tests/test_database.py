@@ -290,3 +290,105 @@ def test_clear_with_vacuum_commits_deletions(tmp_path: Path) -> None:
     assert database.fetched_at("readiness", "2026-01-01") is None
     with database.connect() as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_activity_note_round_trips_and_list_reads_never_erase_it(tmp_path: Path) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    note = "Wall balls 9 kg\n3 Runden · Griff müde 💪"
+    summary = ActivitySummary(activity_id=5, start_time="2026-08-20 08:00:00", description=note)
+    database.put_activity_detail(ActivityDetail(summary=summary))
+    # A later list read that omits the note must not clear the stored one.
+    database.put_activity_summary(summary.model_copy(update={"description": None}))
+    cached = database.get_activity(5)
+    assert cached is not None and cached.summary.description == note
+    assert database.list_activities("2026-08-20", "2026-08-20")[0].description == note
+    # An edited note arriving through any read replaces the stored one.
+    database.put_activity_summary(summary.model_copy(update={"description": "edited"}))
+    cached = database.get_activity(5)
+    assert cached is not None and cached.summary.description == "edited"
+    # A detail read is authoritative, so a note deleted in Garmin Connect disappears.
+    database.put_activity_detail(
+        ActivityDetail(summary=summary.model_copy(update={"description": None}))
+    )
+    cached = database.get_activity(5)
+    assert cached is not None and cached.summary.description is None
+
+
+def test_schema_five_cache_gains_notes_and_rereads_activities_once(tmp_path: Path) -> None:
+    path = tmp_path / "garmin.sqlite"
+    settled = datetime(2026, 8, 25, 9, tzinfo=UTC)
+    database = GarminDatabase(path)
+    database.put_activity_detail(
+        ActivityDetail(
+            summary=ActivitySummary(
+                activity_id=7, start_time="2026-08-20 08:00:00", duration_seconds=600
+            )
+        ),
+        now=settled,
+    )
+    database.mark_synced("activities", "2026-08-20:2026-08-20", now=settled)
+    database.close()
+    # Recreate a version-5 cache: same rows, but no description column.
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("ALTER TABLE activities DROP COLUMN description")
+        connection.execute("PRAGMA user_version = 5")
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = GarminDatabase(path)
+    later = datetime(2026, 9, 1, 9, tzinfo=UTC)
+    with database.connect() as migrated:
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        columns = {row[1] for row in migrated.execute("PRAGMA table_info(activities)")}
+        assert "description" in columns
+        # The detail stays counted as detail-backed for weekly coverage.
+        assert migrated.execute("SELECT detail_fetched_at FROM activities").fetchone()[0]
+    kept = database.get_activity(7)
+    assert kept is not None and kept.summary.duration_seconds == 600
+    # Settled rows from before the upgrade never saw notes, so they are re-read once.
+    assert database.get_activity(7, require_detail=True, now=later) is None
+    assert not database.is_activity_range_fresh("2026-08-20", "2026-08-20", now=later)
+    database.close()
+    # Reopening an already-migrated cache does not invalidate anything again.
+    database = GarminDatabase(path)
+    database.put_activity_detail(
+        ActivityDetail(summary=ActivitySummary(activity_id=7, start_time="2026-08-20 08:00:00")),
+        now=settled,
+    )
+    database.close()
+    database = GarminDatabase(path)
+    assert database.get_activity(7, require_detail=True, now=later) is not None
+
+
+def test_cached_zone_total_is_rounded_like_a_live_read(tmp_path: Path) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    zones = {"zone_1": 0.1, "zone_2": 0.2}  # sums to 0.30000000000000004 unrounded
+    database.put_activity_detail(
+        ActivityDetail(
+            summary=ActivitySummary(activity_id=3, start_time="2026-08-20 08:00:00"),
+            hr_zones_seconds=zones,
+        )
+    )
+    cached = database.get_activity(3)
+    assert cached is not None and cached.hr_zones_total_seconds == 0.3
+
+
+def test_activity_ratings_survive_list_reads_and_clear_on_detail_reads(tmp_path: Path) -> None:
+    database = GarminDatabase(tmp_path / "garmin.sqlite")
+    rated = ActivitySummary(
+        activity_id=5, start_time="2026-08-20 08:00:00", perceived_effort=4, feel="normal"
+    )
+    database.put_activity_detail(ActivityDetail(summary=rated))
+    # Garmin's activity list never carries ratings; a list read must not erase them.
+    database.put_activity_summary(ActivitySummary(activity_id=5, start_time=rated.start_time))
+    cached = database.get_activity(5)
+    assert cached is not None
+    assert (cached.summary.perceived_effort, cached.summary.feel) == (4, "normal")
+    database.put_activity_detail(
+        ActivityDetail(summary=ActivitySummary(activity_id=5, start_time=rated.start_time))
+    )
+    cached = database.get_activity(5)
+    assert cached is not None
+    assert (cached.summary.perceived_effort, cached.summary.feel) == (None, None)

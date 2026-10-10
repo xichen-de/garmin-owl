@@ -164,7 +164,7 @@ Your assistant chooses among 19 read-only tools. None of them can change anythin
 | --- | --- |
 | `get_activities` | Activity summaries over up to 366 days (defaults to the last 14), at most 100 results |
 | `get_recent_activities` | Activities from the last 1–90 days, optionally filtered by type (for example `running`) |
-| `get_activity` | One activity's laps, training effect, and HR/power zones |
+| `get_activity` | One activity's laps, training effect, HR/power zones, and your [notes and ratings](#your-own-training-notes) |
 | `compare_activities` | Side-by-side metrics for 2–10 activities |
 | `get_training_week` | Mon–Sun totals and zone time, with per-metric coverage |
 | `get_training_load` | Acute/chronic load, ratio/status, load focus/targets, VO2 max, endurance, hill, acclimation |
@@ -203,6 +203,10 @@ You don't need to know these limits: describe the period in plain language and C
 - **Gaps are explained** in an `availability` list: Garmin had no data, the metric is unsupported on your device, or the read failed or was rate-limited.
 - `get_cycle` deliberately leaves out notes, symptoms, moods, sexual activity, and raw daily logs.
 
+### Your own training notes
+
+Add notes to an activity's description in Garmin Connect, such as exercises, weights, or how it felt, and the assistant reads them alongside Garmin's numbers. `get_activity` returns them exactly as you typed them, together with any perceived effort and "How did you feel?" ratings you gave the activity.
+
 ## Faster answers with the local cache (optional)
 
 `garmin-owl` keeps what it reads in a small local database, so each day is fetched from Garmin only once. That happens automatically, but you can pre-load history so your first questions are quick:
@@ -236,6 +240,8 @@ Set `GARMIN_OWL_DB` to use a different file. If you used a version before 0.2.1 
 <summary><b>When is cached data refreshed?</b></summary>
 
 Watches and scales upload late, so a day counts as final only from **noon the next day**. Data fetched after that point is kept for good. Data fetched earlier, while the day could still change, is reused for at most 20 minutes and then fetched again. Today's numbers therefore stay current, and a half-synced day never gets stuck in the cache.
+
+Activity notes and ratings can be edited at any time, so if you change them on an older activity, ask the assistant to refresh that activity.
 
 </details>
 
@@ -282,7 +288,7 @@ uv run garmin-owl-smoke
 
 - Everything runs locally and talks to your MCP client only over local stdio. There is no network listener, telemetry, or remote database.
 - Garmin access is read-only. `garmin-owl` has no tool that can change your account.
-- Tokens stay in `~/.garminconnect`. Only normalized numbers are stored in the local cache, never raw Garmin responses.
+- Tokens stay in `~/.garminconnect`. Only normalized data, including your activity notes, is stored in the local cache, never raw Garmin responses.
 - Answers exclude credentials, account identifiers, raw GPS coordinates, and private cycle logs.
 - Health summaries are informational, **not medical advice**.
 
