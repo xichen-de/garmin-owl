@@ -181,6 +181,8 @@ def test_hrv_fallback_and_metric_qualifiers_are_disclosed(tmp_path: Path) -> Non
     statuses = {item["field"]: item["status"] for item in result["availability"]}
     assert statuses["hrv_nightly"] == "alternate_garmin_source"
     assert statuses["hrv_weekly"] == "series_only_no_deviation"
+    weekly = next(item for item in result["availability"] if item["field"] == "hrv_weekly")
+    assert "period summar" not in weekly["message"], "the wording must fit every tool"
     assert statuses["skin_temp_deviation"] == "garmin_baseline_deviation"
     assert result["units"]["skin_temp_deviation"].startswith("°C")
 

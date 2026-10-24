@@ -712,13 +712,21 @@ class GarminTools:
                 continue
             used += size
             details.append(item)
-        return ActivityDetailBatch(
+        result = ActivityDetailBatch(
             requested=len(activity_ids),
             returned=len(details),
             detail=detail,
             activities=details,
             not_returned=failures,
         ).compact()
+        if detail == "compact":
+            # Compact mode leaves laps and power zones out entirely; empty containers would
+            # read as "Garmin recorded none".
+            for activity in result["activities"]:
+                for key in ("laps", "power_zones_seconds", "hr_zones_seconds"):
+                    if not activity.get(key):
+                        activity.pop(key, None)
+        return result
 
     def get_body_composition(
         self, start_date: str | None = None, end_date: str | None = None

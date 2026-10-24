@@ -326,7 +326,13 @@ def _device(item: dict[str, Any]) -> DeviceInfo:
             if isinstance(registered, int | float) and not isinstance(registered, bool)
             else None
         ),
-        primary=item.get("primary") if isinstance(item.get("primary"), bool) else None,
+        # Garmin sets ``primary`` on every paired device (verified live: watch and chest strap);
+        # only this flag marks the one device that counts as the activity tracker.
+        primary=(
+            tracker
+            if isinstance(tracker := item.get("primaryActivityTrackerIndicator"), bool)
+            else None
+        ),
     )
 
 

@@ -214,3 +214,11 @@ def test_an_activity_without_zone_data_still_returns_its_detail(tmp_path: Path) 
     assert result["returned"] == 2
     statuses = {item["field"]: item["status"] for item in result["activities"][0]["availability"]}
     assert statuses["hr_zones_seconds"] == "unsupported_or_unavailable"
+
+
+def test_compact_details_omit_containers_instead_of_sending_them_empty(tmp_path: Path) -> None:
+    compact = _tools(ClassesGarmin(), tmp_path).get_activities_detail([1])
+    assert not {"laps", "power_zones_seconds"} & set(compact["activities"][0])
+    assert compact["activities"][0]["hr_zones_seconds"], "non-empty zone time stays"
+    full = _tools(ClassesGarmin(), tmp_path / "full").get_activities_detail([1], detail="full")
+    assert len(full["activities"][0]["laps"]) == 12

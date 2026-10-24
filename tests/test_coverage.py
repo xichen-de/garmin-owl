@@ -79,10 +79,18 @@ class AccountGarmin(HistoryGarmin):
                     "deviceStatus": "active",
                     "registeredDate": 1754000000000,
                     "primary": True,
+                    "primaryActivityTrackerIndicator": True,
                     "serialNumber": "SECRET-SERIAL",
                     "unitId": 123456789,
                     "displayName": "Owner's watch",
-                }
+                },
+                # Garmin marks every paired device primary; only the tracker flag differs.
+                {
+                    "productDisplayName": "HRM-Pro Plus",
+                    "deviceStatus": "active",
+                    "primary": True,
+                    "primaryActivityTrackerIndicator": False,
+                },
             ],
         )
 
@@ -128,7 +136,8 @@ def test_devices_never_expose_serials_or_nicknames(tmp_path: Path) -> None:
             "status": "active",
             "registered_date": result["devices"][0]["registered_date"],
             "primary": True,
-        }
+        },
+        {"product_name": "HRM-Pro Plus", "status": "active", "primary": False},
     ]
     text = str(result)
     assert "SECRET-SERIAL" not in text and "123456789" not in text and "Owner" not in text

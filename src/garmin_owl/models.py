@@ -678,7 +678,9 @@ class DeviceInfo(OwlModel):
     product_name: str | None = None
     status: str | None = None
     registered_date: str | None = None
-    primary: bool | None = None
+    primary: bool | None = Field(
+        default=None, description="True for the device Garmin uses as the primary tracker."
+    )
 
 
 class DataCoverage(OwlModel):
@@ -700,7 +702,11 @@ class Vo2MaxPoint(OwlModel):
         "cycling is its cycling estimate."
     )
     vo2_max: float = Field(description="ml/kg/min, Garmin's precise value when available.")
-    fitness_age: float | None = None
+    fitness_age: float | None = Field(
+        default=None,
+        description="Only when Garmin includes it in the VO2 max history; many accounts' "
+        "history has none, and availability then says so.",
+    )
 
 
 class Vo2MaxHistory(OwlModel):
