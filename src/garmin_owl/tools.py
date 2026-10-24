@@ -312,6 +312,14 @@ class GarminTools:
         )
         return self._series_reader().period_summary(start, end, chosen, group_by).compact()
 
+    def get_vo2max_history(
+        self, start_date: str | None = None, end_date: str | None = None
+    ) -> dict[str, Any]:
+        start, end = self._past_range(
+            start_date, end_date, default_days=DEFAULT_SUMMARY_DAYS, max_days=MAX_SUMMARY_DAYS
+        )
+        return self._series_reader().vo2max_history(start, end).compact()
+
     def get_data_coverage(self, refresh: bool = False) -> dict[str, Any]:
         return data_coverage(self.client, self.database, refresh=refresh)
 

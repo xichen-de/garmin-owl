@@ -114,6 +114,10 @@
     {
       "name": "get_activities_detail",
       "description": "Read details for up to 50 activities at once: notes, effort ratings, recovery HR, zone time and the HR-zone floors in effect for each."
+    },
+    {
+      "name": "get_vo2max_history",
+      "description": "Read Garmin's VO2 max estimates (running/walking and cycling) and fitness age over up to three years."
     }
   ],
   "tools_generated": false,

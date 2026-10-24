@@ -39,6 +39,7 @@ def test_server_registers_only_the_intended_read_tools() -> None:
         "get_period_summary",
         "get_data_coverage",
         "get_activities_detail",
+        "get_vo2max_history",
     }
 
 

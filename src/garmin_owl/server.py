@@ -40,6 +40,7 @@ from .models import (
     TrainingReadiness,
     TrainingWeek,
     TrainingZones,
+    Vo2MaxHistory,
 )
 from .tools import GarminOwlInputError, GarminTools
 
@@ -655,9 +656,11 @@ def get_training_load(date: Day = None) -> Annotated[CallToolResult, TrainingLoa
     and hill scores, and heat/altitude acclimation.
 
     Use for training status and load balance; use get_training_week for activity totals in a
-    calendar week, get_training_readiness for readiness on a day, or get_training_context to
-    combine load with recovery. Values are Garmin's own. Device support varies: a source Garmin
-    has no data for is named in availability, and its fields are absent rather than zero.
+    calendar week, get_training_readiness for readiness on a day, get_training_context to
+    combine load with recovery, or get_vo2max_history for VO2 max over months (this tool's
+    vo2_max is often absent on days without a new estimate). Values are Garmin's own. Device
+    support varies: a source Garmin has no data for is named in availability, and its fields
+    are absent rather than zero.
 
     Requires saved local Garmin authentication (garmin-owl-auth). Reads Garmin and may update
     the local cache; never changes your Garmin account. Garmin failures are not retried
@@ -897,6 +900,37 @@ def get_data_coverage(
     automatically.
     """
     return _tool_result(get_tools().get_data_coverage(refresh))
+
+
+@mcp.tool(annotations=_READ_ANNOTATIONS)
+@_expose_safe_errors
+def get_vo2max_history(
+    start_date: Annotated[
+        str | None,
+        Field(
+            pattern=DATE_PATTERN,
+            description=(
+                "Inclusive start date, YYYY-MM-DD; must not follow end_date. Range is at most "
+                "1096 days; defaults to the 365 days ending on end_date."
+            ),
+        ),
+    ] = None,
+    end_date: RangeEnd = None,
+) -> Annotated[CallToolResult, Vo2MaxHistory]:
+    """Get Garmin's VO2 max estimates and fitness age over up to three years, one point per day
+    Garmin updated them.
+
+    Use for VO2 max or fitness-age trends; use get_training_load for today's training status
+    with the current VO2 max, or get_activities for the vo2_max recorded on individual
+    activities. sport is generic (Garmin's running/walking estimate; Garmin does not say which)
+    or cycling. Days without a point had no new estimate: do not read them as missing data.
+    One Garmin request covers up to a year and the result is cached.
+
+    Requires saved local Garmin authentication (garmin-owl-auth). Reads Garmin and may update
+    the local cache; never changes your Garmin account. Garmin failures are not retried
+    automatically.
+    """
+    return _tool_result(get_tools().get_vo2max_history(start_date, end_date), compact=True)
 
 
 @mcp.tool(annotations=_READ_ANNOTATIONS)

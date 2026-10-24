@@ -922,6 +922,28 @@ def normalize_stress_range(raw: Any) -> dict[str, int]:
     return result
 
 
+def normalize_vo2max_range(raw: Any) -> dict[str, dict[str, float | None]]:
+    """Garmin's max-metrics history: VO2 max per sport family and fitness age, per day.
+
+    ``generic`` is Garmin's running/walking estimate (the payload does not say which of the
+    two) and ``cycling`` its cycling estimate. Days without an update are absent.
+    """
+    result: dict[str, dict[str, float | None]] = {}
+    for item in _list(raw):
+        root = _map(item)
+        for sport in ("generic", "cycling"):
+            entry = _map(root.get(sport))
+            cdate = _text(entry.get("calendarDate"))
+            value = _rounded(_first(entry, "vo2MaxPreciseValue", "vo2MaxValue"), 1)
+            if cdate is None or value is None or value <= 0:
+                continue
+            day = result.setdefault(cdate[:10], {})
+            day[f"vo2max_{sport}"] = value
+            if sport == "generic":
+                day["fitness_age"] = _rounded(entry.get("fitnessAge"), 1)
+    return result
+
+
 def normalize_body_battery_range(raw: Any) -> dict[str, BodyBatterySummary]:
     result: dict[str, BodyBatterySummary] = {}
     for item in _list(raw):

@@ -39,6 +39,8 @@ from .models import (
     PeriodStat,
     PeriodSummary,
     SeriesExport,
+    Vo2MaxHistory,
+    Vo2MaxPoint,
 )
 from .normalize import (
     normalize_body_battery_range,
@@ -46,6 +48,7 @@ from .normalize import (
     normalize_resting_hr_range,
     normalize_sleep_range,
     normalize_stress_range,
+    normalize_vo2max_range,
 )
 from .notices import RATE_LIMITED, RETRIEVAL_FAILED
 from .sync import SyncEngine
@@ -90,6 +93,7 @@ PER_DAY_REQUEST_BUDGET = 60
 HRV_RANGE_DAYS = 366  # verified live: "Exceeded max date difference (366 days)"
 SLEEP_RANGE_DAYS = 28  # Garmin's sleep stats limit; upstream would otherwise split silently
 RESTING_HR_RANGE_DAYS = 366
+VO2MAX_RANGE_DAYS = 366  # one request served 449 days live; 366 keeps a margin
 
 Values = dict[str, dict[str, float | None]]
 
@@ -145,6 +149,10 @@ def _stress(client: GarminDataClient, start: str, end: str) -> Values:
     }
 
 
+def _vo2max(client: GarminDataClient, start: str, end: str) -> Values:
+    return normalize_vo2max_range(client.max_metrics_range(start, end))
+
+
 @dataclass(frozen=True)
 class _Source:
     name: str
@@ -174,6 +182,10 @@ _SOURCES = (
         _body_battery,
     ),
     _Source("stress_range", STRESS_RANGE_DAYS, ("stress_avg",), _stress),
+)
+# Not a daily-series metric: Garmin updates it only on some days, so it has its own tool.
+VO2MAX_SOURCE = _Source(
+    "vo2max_range", VO2MAX_RANGE_DAYS, ("vo2max_generic", "vo2max_cycling", "fitness_age"), _vo2max
 )
 # Which stored values each public metric is built from.
 _STORED_FOR = {
@@ -415,6 +427,53 @@ class SeriesReader:
             if metric in metrics:
                 notices.append(AvailabilityNotice(field=metric, status=status, message=message))
         return notices
+
+    def vo2max_history(self, start: date, end: date) -> Vo2MaxHistory:
+        days = _days(start, end)
+        budget = _Budget()
+        self._fill_range(VO2MAX_SOURCE, days, budget)
+        stored = self.database.get_series(days[0], days[-1], VO2MAX_SOURCE.stored)
+        points = [
+            Vo2MaxPoint(
+                date=cdate,
+                sport=sport,
+                vo2_max=values[f"vo2max_{sport}"],
+                fitness_age=values.get("fitness_age") if sport == "generic" else None,
+            )
+            for cdate in days
+            if (values := stored.get(cdate))
+            for sport in ("generic", "cycling")
+            if f"vo2max_{sport}" in values
+        ]
+        notices: list[AvailabilityNotice] = []
+        if budget.unread.get(VO2MAX_SOURCE.name):
+            unread = sorted(set(budget.unread[VO2MAX_SOURCE.name]))
+            notices.append(
+                AvailabilityNotice(
+                    field="vo2_max",
+                    status=_failure_status(budget.failure)
+                    if budget.failure is not None
+                    else "request_budget_reached",
+                    message=f"Not retrieved for {_span_text(unread)}: those estimates are "
+                    "unknown, not absent. Calling again continues from the cache.",
+                )
+            )
+        if not points:
+            notices.append(
+                AvailabilityNotice(
+                    field="vo2_max",
+                    status="missing_or_unsupported",
+                    message="Garmin has no VO2 max estimate in this range. Garmin estimates it "
+                    "only from qualifying outdoor runs, walks or rides with heart rate.",
+                )
+            )
+        return Vo2MaxHistory(
+            start_date=days[0],
+            end_date=days[-1],
+            count=len(points),
+            points=points,
+            availability=notices,
+        )
 
     # -- shaping -------------------------------------------------------------------------
 

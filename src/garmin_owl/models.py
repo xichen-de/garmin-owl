@@ -676,3 +676,25 @@ class DataCoverage(OwlModel):
         "Dates bound where Garmin has data; days inside the span can still be missing. Use "
         "get_daily_series or get_period_summary coverage for gaps."
     )
+
+
+class Vo2MaxPoint(OwlModel):
+    date: str
+    sport: str = Field(
+        description="generic is Garmin's running/walking estimate (Garmin does not say which); "
+        "cycling is its cycling estimate."
+    )
+    vo2_max: float = Field(description="ml/kg/min, Garmin's precise value when available.")
+    fitness_age: float | None = None
+
+
+class Vo2MaxHistory(OwlModel):
+    start_date: str
+    end_date: str
+    count: int
+    points: list[Vo2MaxPoint] = Field(default_factory=list)
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
+    note: str = (
+        "Garmin's own estimates, recorded only on days Garmin updated them; days between "
+        "points carry no new estimate, not a missing measurement."
+    )
