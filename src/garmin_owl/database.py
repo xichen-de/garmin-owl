@@ -49,7 +49,7 @@ from .notices import (
 # Bump whenever stored values change meaning or format, and add a step to ``_migrate`` that
 # invalidates the affected rows. A cache is checked against this when opened and on every
 # transaction, so an update can never serve rows written in an older format.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _STALE = "1970-01-01T00:00:00+00:00"
 _logger = logging.getLogger(__name__)
 TODAY_TTL = timedelta(minutes=20)
@@ -184,6 +184,11 @@ CREATE TABLE IF NOT EXISTS cycle_metrics (
   fertile_window_start TEXT, fertile_window_end TEXT,
   next_predicted_cycle_start TEXT, data_status TEXT, fetched_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS daily_series (
+  date TEXT NOT NULL, metric TEXT NOT NULL, source TEXT NOT NULL, value REAL,
+  fetched_at TEXT NOT NULL, PRIMARY KEY(date, metric)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_series_source ON daily_series(source, date);
 """
 
 # Columns added after the first release of a table, applied to caches created earlier.
@@ -1397,6 +1402,60 @@ class GarminDatabase:
             ],
         )
 
+    def series_fetched(self, source: str, start: str, end: str) -> dict[str, datetime]:
+        """When each day of ``source`` was last read by a range read, including empty days."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT date, min(fetched_at) FROM daily_series "
+                "WHERE source=? AND date BETWEEN ? AND ? GROUP BY date",
+                (source, start, end),
+            ).fetchall()
+        return {str(row[0]): datetime.fromisoformat(row[1]) for row in rows}
+
+    def put_series(
+        self,
+        source: str,
+        metrics: tuple[str, ...],
+        values: Mapping[str, Mapping[str, float | None]],
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Store one successful read of ``source`` for every day in ``values``.
+
+        A day Garmin returned nothing for is stored with NULL values, which records that it was
+        read and found empty (not that it was never read) until the day's freshness lapses.
+        """
+        stamp = _timestamp(now)
+        with self.connect() as connection:
+            connection.executemany(
+                "INSERT INTO daily_series(date,metric,source,value,fetched_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(date,metric) DO UPDATE SET source=excluded.source, "
+                "value=excluded.value, fetched_at=excluded.fetched_at",
+                [
+                    (cdate, metric, source, day.get(metric), stamp)
+                    for cdate, day in values.items()
+                    for metric in metrics
+                ],
+            )
+
+    def get_series(
+        self, start: str, end: str, metrics: tuple[str, ...]
+    ) -> dict[str, dict[str, float]]:
+        """Stored non-null values per day for the requested metrics."""
+        if not metrics:
+            return {}
+        placeholders = ",".join("?" for _ in metrics)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT date, metric, value FROM daily_series WHERE date BETWEEN ? AND ? "
+                f"AND metric IN ({placeholders}) AND value IS NOT NULL",
+                (start, end, *metrics),
+            ).fetchall()
+        result: dict[str, dict[str, float]] = {}
+        for row in rows:
+            result.setdefault(str(row[0]), {})[str(row[1])] = float(row[2])
+        return result
+
     def _row(self, table: str, key: str, value: Any) -> sqlite3.Row | None:
         with self.connect() as connection:
             return cast(
@@ -1418,6 +1477,7 @@ class GarminDatabase:
             "cycle_metrics",
             "body_battery",
             "stress",
+            "daily_series",
         )
         with self.connect() as connection:
             counts = {
@@ -1449,6 +1509,7 @@ class GarminDatabase:
             "cycle_metrics",
             "body_battery",
             "stress",
+            "daily_series",
         )
         with self.connect() as connection:
             for table in tables:

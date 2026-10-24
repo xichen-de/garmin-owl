@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date, timedelta
 from functools import wraps
+from pathlib import Path
 from statistics import fmean
 from typing import Any
 
@@ -17,7 +18,7 @@ from .client import (
     GarminOwlRateLimitError,
     GarminOwlUnavailableError,
 )
-from .database import GarminDatabase
+from .database import GarminDatabase, default_db_path
 from .models import (
     ActivityComparison,
     ActivityDetail,
@@ -66,6 +67,7 @@ from .notices import (
     RETRIEVAL_FAILED,
     partial_coverage_notice,
 )
+from .series import SeriesReader, validate_metrics
 from .sync import SyncEngine, dates_between, read_training_load_sources
 
 _DATE_FORMAT = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -74,6 +76,11 @@ _NOT_METRICS = frozenset({"date", "availability", "skin_temperature_basis"})
 MAX_RANGE_DAYS = 366
 MAX_ACTIVITIES = 100
 MAX_TREND_DAYS = 28
+MAX_SUMMARY_DAYS = 1096
+MAX_WEEKLY_SUMMARY_DAYS = 366
+DEFAULT_SERIES_DAYS = 90
+DEFAULT_SUMMARY_DAYS = 365
+SERIES_OUTPUTS = ("inline", "csv", "json")
 DEFAULT_RANGE_DAYS = 30
 # Window used when get_activities is called without any date, so the cached and uncached paths
 # answer the same question instead of silently differing.
@@ -138,6 +145,7 @@ def parse_range(
     end_date: str | None,
     *,
     default_days: int = DEFAULT_RANGE_DAYS,
+    max_days: int = MAX_RANGE_DAYS,
 ) -> tuple[str, str]:
     today = date.today()
     end = parse_date(end_date, default=today, name="end_date")
@@ -146,8 +154,8 @@ def parse_range(
     )
     if start > end:
         raise GarminOwlInputError("start_date must be on or before end_date")
-    if (end - start).days + 1 > MAX_RANGE_DAYS:
-        raise GarminOwlInputError(f"date range cannot exceed {MAX_RANGE_DAYS} days")
+    if (end - start).days + 1 > max_days:
+        raise GarminOwlInputError(f"date range cannot exceed {max_days} days")
     return start.isoformat(), end.isoformat()
 
 
@@ -197,6 +205,63 @@ class GarminTools:
             database if database is not None else (GarminDatabase() if client is None else None)
         )
         self.sync = SyncEngine(self.client, self.database) if self.database is not None else None
+
+    @property
+    def export_dir(self) -> Path:
+        """garmin-owl's own export folder, next to the local cache."""
+        base = self.database.path.parent if self.database is not None else default_db_path().parent
+        return base / "exports"
+
+    def _series_reader(self) -> SeriesReader:
+        if self.database is None or self.sync is None:
+            raise RuntimeError("daily series require the local normalized cache")
+        return SeriesReader(self.client, self.database, self.sync)
+
+    @staticmethod
+    def _past_range(
+        start_date: str | None, end_date: str | None, *, default_days: int, max_days: int
+    ) -> tuple[date, date]:
+        start, end = parse_range(start_date, end_date, default_days=default_days, max_days=max_days)
+        if date.fromisoformat(end) > date.today():
+            raise GarminOwlInputError("end_date cannot be in the future")
+        return date.fromisoformat(start), date.fromisoformat(end)
+
+    def get_daily_series(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        metrics: Sequence[str] | None = None,
+        output: str = "inline",
+    ) -> dict[str, Any]:
+        if output not in SERIES_OUTPUTS:
+            raise GarminOwlInputError(f"output must be one of: {', '.join(SERIES_OUTPUTS)}")
+        chosen = validate_metrics(metrics, error=GarminOwlInputError)
+        start, end = self._past_range(
+            start_date, end_date, default_days=DEFAULT_SERIES_DAYS, max_days=MAX_RANGE_DAYS
+        )
+        return (
+            self._series_reader()
+            .daily_series(start, end, chosen, output=output, export_dir=self.export_dir)
+            .compact()
+        )
+
+    def get_period_summary(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        group_by: str = "month",
+        metrics: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        if group_by not in ("month", "week"):
+            raise GarminOwlInputError("group_by must be 'month' or 'week'")
+        chosen = validate_metrics(metrics, error=GarminOwlInputError)
+        start, end = self._past_range(
+            start_date,
+            end_date,
+            default_days=DEFAULT_SUMMARY_DAYS,
+            max_days=MAX_SUMMARY_DAYS if group_by == "month" else MAX_WEEKLY_SUMMARY_DAYS,
+        )
+        return self._series_reader().period_summary(start, end, chosen, group_by).compact()
 
     def _ensure(self, resource: str, cdate: str) -> None:
         if self.sync is not None:

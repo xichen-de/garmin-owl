@@ -30,6 +30,7 @@ PACKAGE_FILES = (
     "src/garmin_owl/models.py",
     "src/garmin_owl/normalize.py",
     "src/garmin_owl/notices.py",
+    "src/garmin_owl/series.py",
     "src/garmin_owl/server.py",
     "src/garmin_owl/smoke.py",
     "src/garmin_owl/sync.py",

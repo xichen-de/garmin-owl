@@ -68,6 +68,11 @@ class FakeGarmin:
     def get_rhr_daily(self, startdate: str, enddate: str) -> list[dict[str, Any]]:
         return self._record("get_rhr_daily", [{"calendarDate": startdate, "value": 50}])
 
+    def connectapi(self, path: str, **kwargs: Any) -> Any:
+        """Only the fixed stress-stats path is read through the generic accessor."""
+        assert path.startswith("/usersummary-service/stats/stress/daily/"), path
+        return self._record("stress_daily", [])
+
     def get_training_readiness(self, cdate: str) -> list[dict[str, Any]]:
         return self._record("get_training_readiness", [{"score": 75}])
 
@@ -867,7 +872,7 @@ def test_production_client_checks_authenticated_identity_before_cache_reads(
         display_name = "stale-sidecar-account"
         account = "account-a"
 
-        def connectapi(self, path: str, *, timeout: int) -> dict[str, str]:
+        def connectapi(self, path: str, **kwargs: Any) -> dict[str, str]:
             assert path == "/userprofile-service/socialProfile"
             return {"displayName": self.account}
 

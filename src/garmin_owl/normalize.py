@@ -893,6 +893,22 @@ def normalize_resting_hr_range(raw: Any) -> dict[str, int]:
     return result
 
 
+def normalize_stress_range(raw: Any) -> dict[str, int]:
+    """Garmin's per-day overall stress, the same figure as the daily summary's average.
+
+    Verified live: settled days match ``averageStressLevel`` from the daily summary exactly.
+    """
+    result: dict[str, int] = {}
+    for item in _list(raw):
+        root = _map(item)
+        cdate = _text(root.get("calendarDate"))
+        value = _integer(_map(root.get("values")).get("overallStressLevel"))
+        # Garmin uses negative levels for "not enough data", never as a measurement.
+        if cdate is not None and value is not None and value >= 0:
+            result[cdate] = value
+    return result
+
+
 def normalize_body_battery_range(raw: Any) -> dict[str, BodyBatterySummary]:
     result: dict[str, BodyBatterySummary] = {}
     for item in _list(raw):

@@ -88,6 +88,9 @@ class GarminOwlMissingDataError(GarminOwlError):
 # Garmin's daily Body Battery report answers HTTP 400 for ranges longer than 31 days
 # (verified live; 31 succeeds, 32 fails).
 BODY_BATTERY_RANGE_DAYS = 31
+# Verified live: Garmin's daily stress stats answer HTTP 400 beyond 28 days.
+STRESS_RANGE_DAYS = 28
+_STRESS_DAILY_URL = "/usersummary-service/stats/stress/daily"
 _STATUS_IN_MESSAGE = re.compile(r"(?:\(|API Error |HTTP )([1-5]\d\d)\b")
 _NETWORK_ERROR_NAMES = frozenset(
     {"ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout", "SSLError", "ProxyError"}
@@ -243,6 +246,21 @@ class GarminDataClient:
 
     def stress(self, cdate: str) -> Any:
         return self._read("stress", lambda: self.__api.get_stress_data(cdate))
+
+    def stress_range(self, startdate: str, enddate: str) -> Any:
+        """Read Garmin's per-day stress stats for at most 28 days.
+
+        python-garminconnect wraps only the weekly variant of this endpoint, so the fixed path
+        is called directly. Both dates are re-validated here so nothing else reaches the URL.
+        """
+        start, end = date.fromisoformat(startdate), date.fromisoformat(enddate)
+        if not start <= end < start + timedelta(days=STRESS_RANGE_DAYS):
+            raise ValueError("stress range must span 1-28 days")
+        path = f"{_STRESS_DAILY_URL}/{start.isoformat()}/{end.isoformat()}"
+        return self._read(
+            "stress range",
+            lambda: self.__api.connectapi(path),  # type: ignore[attr-defined]
+        )
 
     def activities(self, startdate: str, enddate: str, limit: int | None = None) -> Any:
         """Read activities for an explicit inclusive date range only.

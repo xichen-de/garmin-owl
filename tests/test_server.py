@@ -35,6 +35,8 @@ def test_server_registers_only_the_intended_read_tools() -> None:
         "get_recent_activities",
         "compare_activities",
         "get_cycle",
+        "get_daily_series",
+        "get_period_summary",
     }
 
 

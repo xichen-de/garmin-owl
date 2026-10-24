@@ -98,6 +98,14 @@
     {
       "name": "get_cycle",
       "description": "Read normalized cycle phase and timing without notes, symptoms, or raw daily logs."
+    },
+    {
+      "name": "get_daily_series",
+      "description": "Read one compact row per day of resting HR, HRV, sleep, stress and Body Battery for up to 366 days, from Garmin's range endpoints."
+    },
+    {
+      "name": "get_period_summary",
+      "description": "Summarize Garmin daily metrics per month or week (mean, SD, min, max, day count) over up to three years in one call."
     }
   ],
   "tools_generated": false,

@@ -521,3 +521,84 @@ class BodyCompositionList(OwlModel):
     count: int = Field(description="Number of weigh-ins returned.")
     entries: list[BodyCompositionEntry] = Field(default_factory=list)
     availability: list[AvailabilityNotice] = Field(default_factory=list)
+
+
+class DateSpan(OwlModel):
+    start: str
+    end: str
+
+
+class MetricCoverage(OwlModel):
+    metric: str
+    days_with_value: int = Field(description="Days in the range for which Garmin had a value.")
+    first_date: str | None = None
+    last_date: str | None = None
+
+
+class SeriesExport(OwlModel):
+    path: str = Field(description="Absolute path of the file written on this computer.")
+    format: str
+    row_count: int
+
+
+class DailySeries(OwlModel):
+    start_date: str
+    end_date: str
+    metrics: list[str]
+    units: dict[str, str]
+    columns: list[str] = Field(description="Column names for every row; the first is date.")
+    rows: list[list[str | float | int | None]] | None = Field(
+        default=None,
+        description="One row per day that has at least one value, oldest first, in columns "
+        "order. null means Garmin had no value for that metric on that day; nothing is "
+        "zero-filled or estimated. Omitted when the series was exported to a file.",
+    )
+    row_count: int
+    coverage: list[MetricCoverage] = Field(default_factory=list)
+    missing_date_ranges: list[DateSpan] = Field(
+        default_factory=list,
+        description="Runs of days with no value for any requested metric.",
+    )
+    export: SeriesExport | None = None
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
+    note: str = "Garmin-provided daily values only; no derived medical or recovery score."
+
+
+class PeriodStat(OwlModel):
+    n: int = Field(description="Days in the period with a value; the statistics use only these.")
+    mean: float | None = None
+    sd: float | None = Field(
+        default=None, description="Sample standard deviation; absent when n is below 2."
+    )
+    min: float | None = None
+    max: float | None = None
+    first: float | None = Field(
+        default=None, description="First value in the period; only for rolling metrics."
+    )
+    last: float | None = Field(
+        default=None, description="Last value in the period; only for rolling metrics."
+    )
+
+
+class PeriodRow(OwlModel):
+    period: str = Field(description="Label: YYYY-MM for months, ISO YYYY-Www for weeks.")
+    start_date: str
+    end_date: str
+    days: int = Field(description="Calendar days of this period inside the requested range.")
+    stats: dict[str, PeriodStat] = Field(default_factory=dict)
+
+
+class PeriodSummary(OwlModel):
+    start_date: str
+    end_date: str
+    group_by: str
+    metrics: list[str]
+    units: dict[str, str]
+    periods: list[PeriodRow] = Field(default_factory=list)
+    coverage: list[MetricCoverage] = Field(default_factory=list)
+    missing_date_ranges: list[DateSpan] = Field(default_factory=list)
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
+    note: str = (
+        "Descriptive statistics over Garmin-provided daily values; missing days are excluded, "
+        "never counted as zero."
+    )

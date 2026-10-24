@@ -8,7 +8,7 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from functools import wraps
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -24,8 +24,10 @@ from .models import (
     BodyBatterySummary,
     BodyCompositionList,
     CycleSummary,
+    DailySeries,
     DailySummary,
     HrvSummary,
+    PeriodSummary,
     RecoverySummary,
     RecoveryTrend,
     RunningTolerance,
@@ -107,6 +109,52 @@ ActivityLimit = Annotated[
     ),
 ]
 
+SeriesMetric = Literal[
+    "resting_hr",
+    "hrv_nightly",
+    "hrv_weekly",
+    "sleep_score",
+    "sleep_hr",
+    "sleep_duration",
+    "respiration",
+    "skin_temp_deviation",
+    "body_battery_charged",
+    "body_battery_drained",
+    "stress_avg",
+    "body_battery_at_wake",
+    "training_readiness",
+]
+SeriesMetrics = Annotated[
+    list[SeriesMetric] | None,
+    Field(
+        min_length=1,
+        description=(
+            "Metrics to return; omit for every range-readable metric (all except "
+            "body_battery_at_wake and training_readiness). Ask only for what the question "
+            "needs. body_battery_at_wake and training_readiness have no Garmin range read: "
+            "each uncached day costs one request, at most 60 per call, so request them only "
+            "when needed and expect to call again to finish a long range."
+        ),
+    ),
+]
+RangeStart = Annotated[
+    str | None,
+    Field(
+        pattern=DATE_PATTERN,
+        description="Inclusive start date, YYYY-MM-DD; must not follow end_date.",
+    ),
+]
+RangeEnd = Annotated[
+    str | None,
+    Field(
+        pattern=DATE_PATTERN,
+        description=(
+            "Inclusive end date, YYYY-MM-DD, not in the future; omit or pass null for today in "
+            "the server's local timezone."
+        ),
+    ),
+]
+
 _tools: GarminTools | None = None
 _tools_lock = threading.Lock()
 
@@ -157,17 +205,21 @@ def _expose_safe_errors[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     return wrapped
 
 
-def _tool_result(data: dict[str, Any] | list[dict[str, Any]]) -> CallToolResult:
+def _tool_result(
+    data: dict[str, Any] | list[dict[str, Any]], *, compact: bool = False
+) -> CallToolResult:
     """Preserve compact service output while the SDK validates its declared model.
 
     Returning a model directly would serialize absent values back as null. Explicit
     CallToolResult keeps both JSON content and structured content unchanged. List tools
-    retain the SDK's result envelope and one text block per item.
+    retain the SDK's result envelope and one text block per item. ``compact`` drops the
+    indentation for long-range tools, where it would otherwise double the response size.
     """
     items = data if isinstance(data, list) else [data]
+    dump: dict[str, Any] = {"separators": (",", ":")} if compact else {"indent": 2}
     return CallToolResult(
         content=[
-            TextContent(type="text", text=json.dumps(item, ensure_ascii=False, indent=2))
+            TextContent(type="text", text=json.dumps(item, ensure_ascii=False, **dump))
             for item in items
         ],
         structured_content={"result": data} if isinstance(data, list) else data,
@@ -684,6 +736,93 @@ def get_cycle(date: Day = None) -> Annotated[CallToolResult, CycleSummary]:
     automatically.
     """
     return _tool_result(get_tools().get_cycle(date))
+
+
+@mcp.tool(annotations=_READ_ANNOTATIONS)
+@_expose_safe_errors
+def get_daily_series(
+    start_date: RangeStart = None,
+    end_date: RangeEnd = None,
+    metrics: SeriesMetrics = None,
+    output: Annotated[
+        Literal["inline", "csv", "json"],
+        Field(
+            description=(
+                "inline (default) returns the rows. csv or json writes them to a new file in "
+                "garmin-owl's local exports folder and returns its path, coverage, and notices "
+                "without rows; only useful when the user will open the file on this computer."
+            )
+        ),
+    ] = "inline",
+) -> Annotated[CallToolResult, DailySeries]:
+    """Get one compact row per day of Garmin daily metrics for up to 366 days (default: the 90
+    days ending on end_date).
+
+    Use for long-range history: plotting or eyeballing a trend over months, finding when
+    something changed, or before/after comparisons with your own arithmetic; use
+    get_period_summary instead for monthly or weekly means/SD (one call covers up to three
+    years), get_recovery_trend for today against the last 1-28 days, or the single-day tools
+    (get_sleep, get_hrv, ...) for every detail of one day. Call get_data_coverage first if the
+    start of the user's history is unknown.
+
+    Metrics: resting_hr, hrv_nightly, hrv_weekly, sleep_score, sleep_hr, sleep_duration (hours),
+    respiration (during sleep), skin_temp_deviation (from the personal baseline),
+    body_battery_charged/drained (whole day), stress_avg (whole day), plus opt-in
+    body_battery_at_wake and training_readiness. units names each metric's unit.
+
+    Returns {columns, rows, coverage, missing_date_ranges, availability}. rows hold only days
+    with at least one value; null inside a row means Garmin had no value, never zero. Values
+    not retrieved (rate limit, request budget) are listed in availability as unknown, not
+    absent; calling again continues from the cache. Reads Garmin's range endpoints in the
+    largest chunks Garmin accepts and caches every day, so repeat calls cost nothing.
+
+    Requires saved local Garmin authentication (garmin-owl-auth). Reads Garmin and may update
+    the local cache; never changes your Garmin account. Garmin failures are not retried
+    automatically.
+    """
+    return _tool_result(
+        get_tools().get_daily_series(start_date, end_date, metrics, output), compact=True
+    )
+
+
+@mcp.tool(annotations=_READ_ANNOTATIONS)
+@_expose_safe_errors
+def get_period_summary(
+    start_date: RangeStart = None,
+    end_date: RangeEnd = None,
+    group_by: Annotated[
+        Literal["month", "week"],
+        Field(
+            description=(
+                "month (default; range up to 1096 days) or ISO week Monday-Sunday (range up to "
+                "366 days). The first and last period are clipped to the range; days says how "
+                "many calendar days each covers."
+            )
+        ),
+    ] = "month",
+    metrics: SeriesMetrics = None,
+) -> Annotated[CallToolResult, PeriodSummary]:
+    """Get per-month or per-week mean, SD, min, max and day count for Garmin daily metrics over
+    up to three years (default: the 365 days ending on end_date).
+
+    Use first for "how did X change over the last year?" questions: one call replaces hundreds
+    of single-day reads; use get_daily_series when the individual days matter, or
+    get_recovery_trend for today against recent days. Same metrics and caching as
+    get_daily_series.
+
+    Each period's stats[metric] has n (days with a value), mean, sd (sample SD, n >= 2), min and
+    max, computed only over days Garmin reported: missing days are excluded, never zero.
+    hrv_weekly is already a rolling 7-day mean, so it gets only first and last. coverage and
+    missing_date_ranges show where the data has gaps; availability lists any days that could
+    not be retrieved this call.
+
+    Requires saved local Garmin authentication (garmin-owl-auth). Reads Garmin and may update
+    the local cache; never changes your Garmin account. Garmin failures are not retried
+    automatically.
+    """
+    return _tool_result(
+        get_tools().get_period_summary(start_date, end_date, group_by, metrics), compact=True
+    )
 
 
 def main() -> None:
