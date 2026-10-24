@@ -103,3 +103,20 @@ def test_normalizer_prefers_precise_values_and_drops_empty_entries() -> None:
         "2026-01-02": {"vo2max_generic": 41.3, "fitness_age": None},
         "2026-01-04": {"vo2max_cycling": 45.0},
     }
+
+
+def test_a_history_without_fitness_age_says_so(tmp_path: Path) -> None:
+    class NoFitnessAge(MaxMetricsGarmin):
+        def get_max_metrics_range(self, start: str, end: str) -> list[dict[str, Any]]:
+            rows = super().get_max_metrics_range(start, end)
+            for row in rows:
+                row["generic"]["fitnessAge"] = None  # as on the live account
+            return rows
+
+    result = _tools(NoFitnessAge(), tmp_path).get_vo2max_history(
+        (END - timedelta(days=30)).isoformat(), END.isoformat()
+    )
+    assert result["count"] > 0
+    assert all("fitness_age" not in point for point in result["points"])
+    notice = next(item for item in result["availability"] if item["field"] == "fitness_age")
+    assert notice["status"] == "missing_or_unsupported"

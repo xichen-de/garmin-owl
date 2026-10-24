@@ -917,8 +917,8 @@ def get_vo2max_history(
     ] = None,
     end_date: RangeEnd = None,
 ) -> Annotated[CallToolResult, Vo2MaxHistory]:
-    """Get Garmin's VO2 max estimates and fitness age over up to three years, one point per day
-    Garmin updated them.
+    """Get Garmin's VO2 max estimates over up to three years, one point per day Garmin updated
+    them, with fitness age where Garmin's history includes it.
 
     Use for VO2 max or fitness-age trends; use get_training_load for today's training status
     with the current VO2 max, or get_activities for the vo2_max recorded on individual

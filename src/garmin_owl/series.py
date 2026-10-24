@@ -424,9 +424,9 @@ class SeriesReader:
         fixed = {
             "hrv_weekly": (
                 "series_only_no_deviation",
-                "Garmin's weekly HRV is already a rolling 7-day mean; period summaries give "
-                "only its first and last value, never a mean or SD that would double-count "
-                "nights. Use hrv_nightly for averages and variability.",
+                "Garmin's weekly HRV is already a rolling 7-day mean: consecutive values share "
+                "nights, so averaging it or taking its SD double-counts them. Use hrv_nightly "
+                "for averages and variability.",
             ),
             "skin_temp_deviation": ("garmin_baseline_deviation", SKIN_TEMPERATURE_BASIS),
             "body_battery_charged": (
@@ -471,6 +471,15 @@ class SeriesReader:
                     else "request_budget_reached",
                     message=f"Not retrieved for {_span_text(unread)}: those estimates are "
                     "unknown, not absent. Calling again continues from the cache.",
+                )
+            )
+        if points and not any(point.fitness_age is not None for point in points):
+            notices.append(
+                AvailabilityNotice(
+                    field="fitness_age",
+                    status="missing_or_unsupported",
+                    message="Garmin's VO2 max history carries no fitness age for this account "
+                    "in this range; Garmin keeps it separately, so it is absent, not unknown.",
                 )
             )
         if not points:
