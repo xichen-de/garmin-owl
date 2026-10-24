@@ -53,7 +53,7 @@
     },
     {
       "name": "get_activities",
-      "description": "Read Garmin activities in a date range of up to 366 days (default: last 14), with a count and truncation flag."
+      "description": "Read Garmin activities in a date range of up to 366 days (default: last 14), filtered by type or minimum duration, in full or compact form, paged with offset/next_offset."
     },
     {
       "name": "get_activity",

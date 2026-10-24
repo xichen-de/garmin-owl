@@ -505,11 +505,26 @@ class ActivityList(OwlModel):
     start_date: str
     end_date: str
     activity_type: str | None = None
+    activity_types: list[str] | None = None
+    min_duration_minutes: float | None = None
+    order: str | None = None
+    offset: int | None = None
     limit: int
     count: int = Field(description="Number of activities returned.")
+    matched: int | None = Field(
+        default=None, description="Activities in the range that passed every filter."
+    )
     truncated: bool = Field(
-        description="True when more activities matched than limit allowed; narrow the range "
-        "or raise limit (at most 100) to see the rest."
+        description="True when more activities matched than this response holds; pass "
+        "next_offset as offset to get the rest."
+    )
+    next_offset: int | None = Field(
+        default=None,
+        description="offset for the next page, present only when more activities matched.",
+    )
+    size_capped: bool | None = Field(
+        default=None,
+        description="True when the page stopped before limit to keep the response small.",
     )
     activities: list[ActivitySummary] = Field(default_factory=list)
     availability: list[AvailabilityNotice] = Field(default_factory=list)

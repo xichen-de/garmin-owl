@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterable, Sequence
 from datetime import date, timedelta
@@ -76,6 +77,27 @@ _DATE_FORMAT = re.compile(r"\d{4}-\d{2}-\d{2}")
 _NOT_METRICS = frozenset({"date", "availability", "skin_temperature_basis"})
 MAX_RANGE_DAYS = 366
 MAX_ACTIVITIES = 100
+MAX_ACTIVITY_OFFSET = 10_000
+# Character budget for one activity page as the client receives it (compact JSON). A page of
+# 100 full listings reached 60-68k characters and overflowed client tool-output limits.
+ACTIVITY_LIST_CHAR_BUDGET = 40_000
+COMPACT_ACTIVITY_FIELDS = (
+    "activity_id",
+    "name",
+    "start_time",
+    "activity_type",
+    "duration_seconds",
+    "distance_m",
+    "calories_kcal",
+    "average_hr_bpm",
+    "max_hr_bpm",
+    "activity_training_load",
+    "aerobic_training_effect",
+    "anaerobic_training_effect",
+    "vo2_max",
+    "recovery_hr_bpm",
+    "has_description",
+)
 MAX_TREND_DAYS = 28
 MAX_SUMMARY_DAYS = 1096
 MAX_WEEKLY_SUMMARY_DAYS = 366
@@ -97,6 +119,11 @@ _FAILURE_MESSAGE = {
     RATE_LIMITED: "Garmin rate-limited this read; the value was not retrieved, not absent.",
     RETRIEVAL_FAILED: "This Garmin read failed; the value was not retrieved, not absent.",
 }
+
+
+def _compact_listing(item: ActivitySummary) -> ActivitySummary:
+    listing = item.listing()
+    return ActivitySummary(**{field: getattr(listing, field) for field in COMPACT_ACTIVITY_FIELDS})
 
 
 class GarminOwlInputError(ValueError):
@@ -409,9 +436,27 @@ class GarminTools:
         start_date: str | None = None,
         end_date: str | None = None,
         limit: int = 20,
+        activity_types: Sequence[str] | None = None,
+        min_duration_minutes: float | None = None,
+        compact: bool = False,
+        offset: int = 0,
+        order: str = "desc",
     ) -> dict[str, Any]:
         if isinstance(limit, bool) or not 1 <= limit <= MAX_ACTIVITIES:
             raise GarminOwlInputError(f"limit must be between 1 and {MAX_ACTIVITIES}")
+        if isinstance(offset, bool) or not 0 <= offset <= MAX_ACTIVITY_OFFSET:
+            raise GarminOwlInputError(f"offset must be between 0 and {MAX_ACTIVITY_OFFSET}")
+        if order not in ("desc", "asc"):
+            raise GarminOwlInputError("order must be 'desc' (newest first) or 'asc'")
+        if min_duration_minutes is not None and (
+            isinstance(min_duration_minutes, bool) or not 0 < min_duration_minutes <= 1440
+        ):
+            raise GarminOwlInputError("min_duration_minutes must be above 0 and at most 1440")
+        types: list[str] | None = None
+        if activity_types is not None:
+            types = [str(item).strip() for item in activity_types]
+            if not 1 <= len(types) <= 20 or not all(types):
+                raise GarminOwlInputError("activity_types must hold 1-20 non-blank type keys")
         if start_date is None and end_date is None:
             # Both paths answer the same bounded question. Previously the uncached path asked
             # Garmin for the N most recent activities of all time while the cached path silently
@@ -421,37 +466,84 @@ class GarminTools:
             end = today.isoformat()
         else:
             start, end = parse_range(start_date, end_date)
-        return self._activity_list(start, end, limit)
+        return self._activity_list(
+            start,
+            end,
+            limit,
+            activity_types=types,
+            min_duration_minutes=min_duration_minutes,
+            compact=compact,
+            offset=offset,
+            order=order,
+            size_cap=True,
+        )
 
-    def _activity_list(
-        self, start: str, end: str, limit: int, activity_type: str | None = None
-    ) -> dict[str, Any]:
-        """List activities newest first, reading one more than limit to detect truncation."""
+    def _range_activities(self, start: str, end: str) -> list[ActivitySummary]:
+        """Every activity in the range, newest first."""
         if self.database is not None and self.sync is not None:
             self.sync.ensure_activities(start, end)
-            items = self.database.list_activities(
-                start, end, limit=limit + 1, activity_type=activity_type
-            )
-        else:
-            # Filter by type before applying the limit, or other types could crowd out matches.
-            items = normalize_activities(
-                self.client.activities(start, end, None if activity_type else limit + 1)
-            )
-            if activity_type:
-                items = [
-                    item
-                    for item in items
-                    if (item.activity_type or "").casefold() == activity_type.casefold()
-                ]
-        shown = items[:limit]
+            return self.database.list_activities(start, end, limit=None)
+        return normalize_activities(self.client.activities(start, end))
+
+    def _activity_list(
+        self,
+        start: str,
+        end: str,
+        limit: int,
+        activity_type: str | None = None,
+        *,
+        activity_types: list[str] | None = None,
+        min_duration_minutes: float | None = None,
+        compact: bool = False,
+        offset: int = 0,
+        order: str = "desc",
+        size_cap: bool = False,
+    ) -> dict[str, Any]:
+        """List activities, filtering before paging so other types never crowd out matches."""
+        items = self._range_activities(start, end)
+        wanted = {
+            item.casefold()
+            for item in (activity_types or ([activity_type] if activity_type else []))
+        }
+        if wanted:
+            items = [item for item in items if (item.activity_type or "").casefold() in wanted]
+        if min_duration_minutes is not None:
+            # An activity without a reported duration cannot be shown to meet the minimum.
+            items = [
+                item
+                for item in items
+                if item.duration_seconds is not None
+                and item.duration_seconds >= min_duration_minutes * 60
+            ]
+        if order == "asc":
+            items = items[::-1]
+        page = items[offset : offset + limit]
+        listed = [_compact_listing(item) if compact else item.listing() for item in page]
+        capped = False
+        if size_cap:
+            used = 0
+            for index, item in enumerate(listed):
+                used += len(json.dumps(item.compact(), ensure_ascii=False, separators=(",", ":")))
+                if used > ACTIVITY_LIST_CHAR_BUDGET and index > 0:
+                    listed, capped = listed[:index], True
+                    break
+        remaining = len(items) > offset + len(listed)
         return ActivityList(
             start_date=start,
             end_date=end,
             activity_type=activity_type,
+            activity_types=activity_types,
+            min_duration_minutes=min_duration_minutes,
+            # Echo paging only when it differs from the default, keeping old responses unchanged.
+            order=order if order != "desc" else None,
+            offset=offset or None,
             limit=limit,
-            count=len(shown),
-            truncated=len(items) > limit,
-            activities=[item.listing() for item in shown],
+            count=len(listed),
+            matched=len(items),
+            truncated=remaining,
+            next_offset=offset + len(listed) if remaining else None,
+            size_capped=capped or None,
+            activities=listed,
         ).compact()
 
     def get_activity(self, activity_id: int, refresh: bool = False) -> dict[str, Any]:
@@ -858,7 +950,9 @@ class GarminTools:
         end = start + timedelta(days=6)
         items = [
             ActivitySummary(**item)
-            for item in self.get_activities(start.isoformat(), end.isoformat(), 100)["activities"]
+            for item in self._activity_list(start.isoformat(), end.isoformat(), MAX_ACTIVITIES)[
+                "activities"
+            ]
         ]
         type_counts: dict[str, int] = {}
         for item in items:
@@ -1010,7 +1104,7 @@ class GarminTools:
             ),
             recent_activities=[
                 ActivitySummary(**item)
-                for item in self.get_activities(activity_start, cdate, MAX_ACTIVITIES)["activities"]
+                for item in self._activity_list(activity_start, cdate, MAX_ACTIVITIES)["activities"]
             ],
             comparisons=comparisons,
             flags=flags,

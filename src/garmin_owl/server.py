@@ -404,17 +404,69 @@ def get_activities(
         ),
     ] = None,
     limit: ActivityLimit = 20,
+    activity_types: Annotated[
+        list[str] | None,
+        Field(
+            min_length=1,
+            max_length=20,
+            description=(
+                "Optional Garmin activity type keys to keep, matched case-insensitively, e.g. "
+                '["indoor_cardio", "strength_training"] or ["running"]. Filtering '
+                "happens before limit and offset. Omit for all types."
+            ),
+        ),
+    ] = None,
+    min_duration_minutes: Annotated[
+        float | None,
+        Field(
+            gt=0,
+            le=1440,
+            description=(
+                "Optional minimum moving duration in minutes, e.g. 20 to drop short walks. "
+                "Activities without a reported duration are excluded."
+            ),
+        ),
+    ] = None,
+    compact: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, return only id, name, start_time, type, duration, distance, "
+                "calories, average/max HR, training load and effects, vo2_max, recovery HR "
+                "(when cached) and has_description: about a third of the size. Defaults to "
+                "false."
+            )
+        ),
+    ] = False,
+    offset: Annotated[
+        int,
+        Field(
+            ge=0,
+            le=10000,
+            description=(
+                "Number of matching activities to skip, for paging: pass the previous "
+                "response's next_offset. Defaults to 0."
+            ),
+        ),
+    ] = 0,
+    order: Annotated[
+        Literal["desc", "asc"],
+        Field(description="desc (default) is newest first; asc is oldest first."),
+    ] = "desc",
 ) -> Annotated[CallToolResult, ActivityList]:
     """List activity summaries whose start falls in an inclusive calendar date range of at most
-    366 days, newest first.
+    366 days, newest first by default.
 
     With both dates omitted, uses the last 14 days including today. With only end_date supplied,
     uses the 30 days ending on that date. Use for calendar ranges such as a month; use
     get_recent_activities for a rolling window with a type filter, get_activity for one
     activity's laps, zones, and notes, or get_training_week for Monday-Sunday totals.
 
-    Returns {start_date, end_date, limit, count, truncated, activities}. truncated is true when
-    more activities matched than limit allowed: raise limit (at most 100) or split the range.
+    For long ranges, filter with activity_types and min_duration_minutes, use compact=true, and
+    page with offset. Returns {start_date, end_date, limit, count, matched, truncated,
+    next_offset, activities}. matched counts every activity passing the filters; truncated is
+    true when more matched than this page holds, and next_offset is the offset of the next page.
+    A page also stops early (size_capped) rather than overflow the client.
     has_description marks activities with notes; get_activity returns the text. Metrics an
     activity did not measure (an indoor workout's distance or speed) are omitted, never zero.
     start_time is ISO 8601 with an explicit UTC offset and already local.
@@ -423,7 +475,19 @@ def get_activities(
     the local cache; never changes your Garmin account. Garmin failures are not retried
     automatically.
     """
-    return _tool_result(get_tools().get_activities(start_date, end_date, limit))
+    return _tool_result(
+        get_tools().get_activities(
+            start_date,
+            end_date,
+            limit,
+            activity_types,
+            min_duration_minutes,
+            compact,
+            offset,
+            order,
+        ),
+        compact=True,
+    )
 
 
 @mcp.tool(annotations=_READ_ANNOTATIONS)
@@ -687,7 +751,7 @@ def get_recent_activities(
     the local cache; never changes your Garmin account. Garmin failures are not retried
     automatically.
     """
-    return _tool_result(get_tools().get_recent_activities(days, activity_type, limit))
+    return _tool_result(get_tools().get_recent_activities(days, activity_type, limit), compact=True)
 
 
 @mcp.tool(annotations=_READ_ANNOTATIONS)

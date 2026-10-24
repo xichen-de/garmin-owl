@@ -1254,7 +1254,7 @@ class GarminDatabase:
         start_date: str,
         end_date: str,
         *,
-        limit: int = 100,
+        limit: int | None = 100,
         activity_type: str | None = None,
     ) -> list[ActivitySummary]:
         sql = "SELECT * FROM activities WHERE date BETWEEN ? AND ?"
@@ -1263,7 +1263,8 @@ class GarminDatabase:
             sql += " AND lower(activity_type)=lower(?)"
             parameters.append(activity_type)
         sql += " ORDER BY start_time DESC, activity_id DESC LIMIT ?"
-        parameters.append(limit)
+        # SQLite reads a negative limit as "no limit".
+        parameters.append(-1 if limit is None else limit)
         with self.connect() as connection:
             rows = connection.execute(sql, parameters).fetchall()
             ids = [int(row["activity_id"]) for row in rows]
