@@ -289,25 +289,40 @@ class SeriesReader:
 
     def _per_day(self, metric: str, days: list[str], budget: _Budget) -> dict[str, float]:
         resource = "readiness" if metric == "training_readiness" else "daily"
+        # Days Garmin confirmed it has nothing for are recorded here (NULL), so they cost no
+        # request again until their freshness lapses, exactly like empty range-read days.
+        missing_source = f"per_day_{metric}"
+        confirmed = self.database.series_fetched(missing_source, days[0], days[-1])
+        now = datetime.now().astimezone()
         result: dict[str, float] = {}
         for cdate in days:
-            if budget.failure is None and (
-                budget.per_day_left > 0 or self.database.is_fresh(resource, cdate)
+            if cdate in confirmed and self.database.is_current(
+                date.fromisoformat(cdate), confirmed[cdate], now
             ):
+                continue
+            if not self.database.is_fresh(resource, cdate):
+                # A cold readiness day also reads the daily summary it is stored with.
+                cost = (
+                    2 if resource == "readiness" and self.database.get_daily(cdate) is None else 1
+                )
+                if budget.failure is not None or budget.per_day_left < cost:
+                    budget.unread.setdefault(metric, []).append(cdate)
+                    continue
+                before = sum(self.client.request_counts().values())
                 try:
-                    if self.sync.ensure_resource(resource, cdate):
-                        budget.per_day_left -= 1
+                    self.sync.ensure_resource(resource, cdate)
                 except GarminOwlAuthError:
                     raise
                 except GarminOwlMissingDataError:
+                    self.database.put_series(missing_source, (metric,), {cdate: {}})
                     continue
                 except GarminOwlError as exc:
                     budget.failure = exc
                     budget.unread.setdefault(metric, []).append(cdate)
                     continue
-            elif not self.database.is_fresh(resource, cdate):
-                budget.unread.setdefault(metric, []).append(cdate)
-                continue
+                finally:
+                    # Charge what was actually requested, failed reads included.
+                    budget.per_day_left -= sum(self.client.request_counts().values()) - before
             if metric == "training_readiness":
                 readiness = self.database.get_readiness(cdate)
                 value = readiness.score if readiness is not None else None
@@ -381,7 +396,7 @@ class SeriesReader:
                 status = "request_budget_reached"
                 reason = (
                     "This call reached its Garmin request budget "
-                    f"({RANGE_REQUEST_BUDGET} range or {PER_DAY_REQUEST_BUDGET} per-day reads)."
+                    f"({RANGE_REQUEST_BUDGET} range or {PER_DAY_REQUEST_BUDGET} per-day requests)."
                 )
             notices.append(
                 AvailabilityNotice(

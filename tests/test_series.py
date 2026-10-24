@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from garminconnect import GarminConnectTooManyRequestsError
+from garminconnect import GarminConnectNotFoundError, GarminConnectTooManyRequestsError
 from test_tools import FakeGarmin, _client
 
 from garmin_owl.database import GarminDatabase
@@ -202,20 +202,48 @@ def test_rate_limit_keeps_what_was_read_and_the_next_call_continues(tmp_path: Pa
     assert not any(item["field"] == "sleep_score" for item in second.get("availability", []))
 
 
-def test_per_day_metrics_are_opt_in_and_budgeted(tmp_path: Path) -> None:
+def test_per_day_metrics_are_opt_in_and_budgeted_by_real_requests(tmp_path: Path) -> None:
     fake = HistoryGarmin()
     tools = _tools(fake, tmp_path)
     tools.get_daily_series(_start(90), END.isoformat())
     assert "get_training_readiness" not in fake.calls
+    fake.calls.clear()
+    # A cold readiness day costs two Garmin requests: readiness and its daily summary.
     result = tools.get_daily_series(_start(90), END.isoformat(), ["training_readiness"])
-    assert fake.calls.count("get_training_readiness") == 60
+    assert len(fake.calls) == 60, "the per-day budget counts requests, not days"
+    assert fake.calls.count("get_training_readiness") == 30
     notice = result["availability"][0]
     assert notice["status"] == "request_budget_reached"
-    assert notice["message"].startswith("Not retrieved for 30 day(s)")
-    again = tools.get_daily_series(_start(90), END.isoformat(), ["training_readiness"])
+    assert notice["message"].startswith("Not retrieved for 60 day(s)")
+    for _ in range(2):
+        again = tools.get_daily_series(_start(90), END.isoformat(), ["training_readiness"])
     assert fake.calls.count("get_training_readiness") == 90
+    assert len(fake.calls) == 180
     assert "availability" not in again
     assert again["coverage"][0]["days_with_value"] == 90
+
+
+def test_unsupported_per_day_metric_is_budgeted_and_cached_as_missing(tmp_path: Path) -> None:
+    class NoReadiness(HistoryGarmin):
+        def get_training_readiness(self, cdate: str) -> list[dict[str, Any]]:
+            self.calls.append("get_training_readiness")
+            raise GarminConnectNotFoundError("unsupported")
+
+    fake = NoReadiness()
+    tools = _tools(fake, tmp_path)
+    first = tools.get_daily_series(_start(366), END.isoformat(), ["training_readiness"])
+    assert len(fake.calls) <= 60, "missing-data reads spend the budget too"
+    assert first["availability"][0]["status"] == "request_budget_reached"
+    calls = 0
+    while "availability" in tools.get_daily_series(
+        _start(366), END.isoformat(), ["training_readiness"]
+    ):
+        calls += 1
+        assert calls < 20, "every call must make progress"
+    total = len(fake.calls)
+    final = tools.get_daily_series(_start(366), END.isoformat(), ["training_readiness"])
+    assert len(fake.calls) == total, "confirmed-missing days are not requested again"
+    assert final["coverage"][0]["days_with_value"] == 0
 
 
 def test_monthly_summary_statistics_exclude_missing_days(tmp_path: Path) -> None:
