@@ -18,6 +18,8 @@ PACKAGE_FILES = (
     "pyproject.toml",
     "uv.lock",
     "README.md",
+    "docs/chatgpt.md",
+    "docs/reference.md",
     "LICENSE",
     "scripts/launch-chatgpt.sh",
     "src/garmin_owl/__init__.py",

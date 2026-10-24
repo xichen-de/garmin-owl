@@ -105,7 +105,7 @@ These are the project's guarantees to users. A change that breaks one of them ne
 3. **Service:** add a method to `GarminTools` that validates input (`parse_date`, `parse_range`, bounds), uses the cache if the data is cacheable, and returns `.compact()`.
 4. **Register:** add a thin function in `server.py`. Its docstring is the description the model sees: explain when to choose it over related tools, relevant limits, authentication, and cache behavior. Add `Annotated`/`Field` descriptions for every parameter and the shared read-only tool annotations. `tests/test_server.py` checks the exported MCP metadata without authenticating. Declare outputs as `Annotated[CallToolResult, YourModel]`; list results get an envelope model with `count` (and `truncated` when capped), like `ActivityList`, and return `_tool_result(...)` so the SDK validates against the model without restoring omitted fields as null. Reuse the models in `models.py`; keep missing metrics optional.
 5. **Declare:** add the tool to the `tools` list in `manifest.json` and to the expected set in `tests/test_server.py`. If you created a new module, add it to `PACKAGE_FILES` in `scripts/build-chatgpt-plugin.py`.
-6. **Document:** add a row to the tool tables and, if relevant, the date-limit table in `README.md`.
+6. **Document:** add a row to the tool tables and, if relevant, the date-limit table in `docs/reference.md`; mention it in the README only if users would look for it there.
 
 ### Changing the cache schema
 
