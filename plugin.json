@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "garmin-owl",
-  "version": "0.2.7",
+  "version": "0.3.0",
   "description": "Local, read-only access to Garmin health and training data.",
   "author": { "name": "garmin-owl contributors" },
   "repository": "https://github.com/xichen-de/garmin-owl",
@@ -17,7 +17,8 @@
         "capabilities": ["Read"],
         "defaultPrompt": [
           "Summarize my recovery today.",
-          "How did I sleep last night?"
+          "How did I sleep last night?",
+          "How have my resting HR and HRV changed month by month over the last year?"
         ]
       }
     }

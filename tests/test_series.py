@@ -320,3 +320,13 @@ def test_stress_range_drops_garmins_negative_not_enough_data_levels() -> None:
         {"calendarDate": "2026-10-03", "values": {}},
     ]
     assert normalize_stress_range(raw) == {"2026-10-01": 31}
+
+
+def test_fifteen_months_of_monthly_rhr_and_hrv_is_one_call(tmp_path: Path) -> None:
+    """The motivating analysis: it took ~130 single-day calls before these tools existed."""
+    fake = HistoryGarmin()
+    result = _tools(fake, tmp_path).get_period_summary(
+        _start(449), END.isoformat(), "month", ["resting_hr", "hrv_nightly"]
+    )
+    assert len(result["periods"]) in (15, 16)
+    assert sorted(fake.calls) == ["get_hrv_data_range"] * 2 + ["get_rhr_daily"] * 2
