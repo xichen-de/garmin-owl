@@ -33,6 +33,10 @@ class GarminReadAPI(Protocol):
     def get_body_battery(self, startdate: str, enddate: str | None = None) -> Any: ...
     def get_stress_data(self, cdate: str) -> dict[str, Any]: ...
     def get_activities_by_date(self, startdate: str, enddate: str | None = None) -> Any: ...
+    def get_activities(self, start: int = 0, limit: int = 20) -> Any: ...
+    def count_activities(self) -> int: ...
+    def get_devices(self) -> list[dict[str, Any]]: ...
+    def get_max_metrics_range(self, start: str, end: str) -> Any: ...
     def get_activity(self, activity_id: str) -> dict[str, Any]: ...
     # Upstream 0.3.11 annotates these as dict, but live endpoints return lists.
     def get_activity_hr_in_timezones(self, activity_id: str) -> dict[str, Any] | list[Any]: ...
@@ -85,9 +89,16 @@ class GarminOwlMissingDataError(GarminOwlError):
     pass
 
 
+# Zone reads that fail this way mean the activity or device has no such breakdown.
+_ZONES_ABSENT = (GarminOwlMissingDataError, GarminOwlRequestError, GarminOwlResponseError)
+
+
 # Garmin's daily Body Battery report answers HTTP 400 for ranges longer than 31 days
 # (verified live; 31 succeeds, 32 fails).
 BODY_BATTERY_RANGE_DAYS = 31
+# Verified live: Garmin's daily stress stats answer HTTP 400 beyond 28 days.
+STRESS_RANGE_DAYS = 28
+_STRESS_DAILY_URL = "/usersummary-service/stats/stress/daily"
 _STATUS_IN_MESSAGE = re.compile(r"(?:\(|API Error |HTTP )([1-5]\d\d)\b")
 _NETWORK_ERROR_NAMES = frozenset(
     {"ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout", "SSLError", "ProxyError"}
@@ -244,6 +255,21 @@ class GarminDataClient:
     def stress(self, cdate: str) -> Any:
         return self._read("stress", lambda: self.__api.get_stress_data(cdate))
 
+    def stress_range(self, startdate: str, enddate: str) -> Any:
+        """Read Garmin's per-day stress stats for at most 28 days.
+
+        python-garminconnect wraps only the weekly variant of this endpoint, so the fixed path
+        is called directly. Both dates are re-validated here so nothing else reaches the URL.
+        """
+        start, end = date.fromisoformat(startdate), date.fromisoformat(enddate)
+        if not start <= end < start + timedelta(days=STRESS_RANGE_DAYS):
+            raise ValueError("stress range must span 1-28 days")
+        path = f"{_STRESS_DAILY_URL}/{start.isoformat()}/{end.isoformat()}"
+        return self._read(
+            "stress range",
+            lambda: self.__api.connectapi(path),  # type: ignore[attr-defined]
+        )
+
     def activities(self, startdate: str, enddate: str, limit: int | None = None) -> Any:
         """Read activities for an explicit inclusive date range only.
 
@@ -256,25 +282,55 @@ class GarminDataClient:
         )
         return data[:limit] if limit is not None and isinstance(data, list) else data
 
-    def activity(self, activity_id: int) -> tuple[Any, Any, Any]:
+    def activity_page(self, offset: int, limit: int) -> Any:
+        """Read activities by position, newest first (offset 0 is the most recent)."""
+        return self._read("activity page", lambda: self.__api.get_activities(offset, limit))
+
+    def activity_count(self) -> int:
+        return self._read("activity count", self.__api.count_activities)
+
+    def devices(self) -> Any:
+        return self._read("devices", self.__api.get_devices)
+
+    def max_metrics_range(self, startdate: str, enddate: str) -> Any:
+        return self._read(
+            "max metrics range", lambda: self.__api.get_max_metrics_range(startdate, enddate)
+        )
+
+    def activity_summary(self, activity_id: int) -> Any:
         activity_key = str(activity_id)
-        summary = self._read("activity detail", lambda: self.__api.get_activity(activity_key))
-        # These are useful but not supported for every activity/device. Absence is not fatal.
+        return self._read("activity detail", lambda: self.__api.get_activity(activity_key))
+
+    def activity_zones(self, activity_id: int, *, power: bool = True) -> tuple[Any, Any]:
+        """Read zone aggregates; ``power=False`` skips the power read for activities without
+        power, which Garmin answers with nothing useful.
+
+        Only answers meaning "this activity has no such breakdown" are absorbed as None. A rate
+        limit, outage or authentication failure propagates, so a detail missing its zones is
+        never returned or cached as if Garmin had none.
+        """
+        activity_key = str(activity_id)
         try:
             hr_zones = self._read(
                 "activity HR zones",
                 lambda: self.__api.get_activity_hr_in_timezones(activity_key),
             )
-        except GarminOwlError:
+        except _ZONES_ABSENT:
             hr_zones = None
-        try:
-            power_zones = self._read(
-                "activity power zones",
-                lambda: self.__api.get_activity_power_in_timezones(activity_key),
-            )
-        except GarminOwlError:
-            power_zones = None
-        return summary, hr_zones, power_zones
+        power_zones = None
+        if power:
+            try:
+                power_zones = self._read(
+                    "activity power zones",
+                    lambda: self.__api.get_activity_power_in_timezones(activity_key),
+                )
+            except _ZONES_ABSENT:
+                power_zones = None
+        return hr_zones, power_zones
+
+    def activity(self, activity_id: int) -> tuple[Any, Any, Any]:
+        summary = self.activity_summary(activity_id)
+        return (summary, *self.activity_zones(activity_id))
 
     def body_composition(self, startdate: str, enddate: str) -> Any:
         return self._read("body composition", lambda: self.__api.get_weigh_ins(startdate, enddate))

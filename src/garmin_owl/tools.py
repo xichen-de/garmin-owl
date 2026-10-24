@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date, timedelta
 from functools import wraps
+from pathlib import Path
 from statistics import fmean
 from typing import Any
 
@@ -17,10 +19,14 @@ from .client import (
     GarminOwlRateLimitError,
     GarminOwlUnavailableError,
 )
-from .database import GarminDatabase
+from .coverage import data_coverage
+from .database import GarminDatabase, default_db_path
+from .events import events_between
 from .models import (
     ActivityComparison,
     ActivityDetail,
+    ActivityDetailBatch,
+    ActivityFailure,
     ActivityList,
     ActivitySummary,
     AvailabilityNotice,
@@ -28,8 +34,10 @@ from .models import (
     BodyCompositionList,
     ComparisonDelta,
     DailyRecoveryPoint,
+    DailySeries,
     DailySummary,
     HrvSummary,
+    PeriodSummary,
     RecoverySummary,
     RecoveryTrend,
     SleepSummary,
@@ -39,6 +47,7 @@ from .models import (
     TrainingReadiness,
     TrainingWeek,
     TrendMetric,
+    Vo2MaxHistory,
 )
 from .normalize import (
     hours_from_minutes,
@@ -62,10 +71,13 @@ from .normalize import (
 )
 from .notices import (
     MISSING_OR_UNSUPPORTED,
+    NOT_RECORDED,
     RATE_LIMITED,
     RETRIEVAL_FAILED,
     partial_coverage_notice,
+    zone_notice,
 )
+from .series import SeriesReader, validate_metrics
 from .sync import SyncEngine, dates_between, read_training_load_sources
 
 _DATE_FORMAT = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -73,7 +85,54 @@ _DATE_FORMAT = re.compile(r"\d{4}-\d{2}-\d{2}")
 _NOT_METRICS = frozenset({"date", "availability", "skin_temperature_basis"})
 MAX_RANGE_DAYS = 366
 MAX_ACTIVITIES = 100
+MAX_ACTIVITY_OFFSET = 10_000
+# Character budget for one activity page as the client receives it (compact JSON). A page of
+# 100 full listings reached 60-68k characters and overflowed client tool-output limits.
+ACTIVITY_LIST_CHAR_BUDGET = 40_000
+MAX_BATCH_ACTIVITIES = 50
+DETAIL_BATCH_CHAR_BUDGET = 40_000
+# Room kept for the envelope and the not_returned entries of up to 50 IDs.
+_DETAIL_ENVELOPE_RESERVE = 4_000
+COMPACT_DETAIL_FIELDS = (
+    "activity_id",
+    "name",
+    "start_time",
+    "activity_type",
+    "duration_seconds",
+    "distance_m",
+    "calories_kcal",
+    "average_hr_bpm",
+    "max_hr_bpm",
+    "recovery_hr_bpm",
+    "activity_training_load",
+    "vo2_max",
+    "description",
+    "perceived_effort",
+    "feel",
+)
+COMPACT_ACTIVITY_FIELDS = (
+    "activity_id",
+    "name",
+    "start_time",
+    "activity_type",
+    "duration_seconds",
+    "distance_m",
+    "calories_kcal",
+    "average_hr_bpm",
+    "max_hr_bpm",
+    "activity_training_load",
+    "aerobic_training_effect",
+    "anaerobic_training_effect",
+    "vo2_max",
+    "recovery_hr_bpm",
+    "has_description",
+)
 MAX_TREND_DAYS = 28
+MAX_SUMMARY_DAYS = 1096
+MAX_WEEKLY_SUMMARY_DAYS = 366
+DEFAULT_SERIES_DAYS = 90
+DEFAULT_SUMMARY_DAYS = 365
+SERIES_OUTPUTS = ("inline", "csv", "json")
 DEFAULT_RANGE_DAYS = 30
 # Window used when get_activities is called without any date, so the cached and uncached paths
 # answer the same question instead of silently differing.
@@ -89,6 +148,21 @@ _FAILURE_MESSAGE = {
     RATE_LIMITED: "Garmin rate-limited this read; the value was not retrieved, not absent.",
     RETRIEVAL_FAILED: "This Garmin read failed; the value was not retrieved, not absent.",
 }
+
+
+def _with_events(
+    result: DailySeries | PeriodSummary | Vo2MaxHistory, start: date, end: date
+) -> dict[str, Any]:
+    """Attach the user's own annotations overlapping the range, read from the local file."""
+    events, notices = events_between(start, end)
+    result.events = events or None
+    result.availability.extend(notices)
+    return result.compact()
+
+
+def _compact_listing(item: ActivitySummary) -> ActivitySummary:
+    listing = item.listing()
+    return ActivitySummary(**{field: getattr(listing, field) for field in COMPACT_ACTIVITY_FIELDS})
 
 
 class GarminOwlInputError(ValueError):
@@ -138,6 +212,7 @@ def parse_range(
     end_date: str | None,
     *,
     default_days: int = DEFAULT_RANGE_DAYS,
+    max_days: int = MAX_RANGE_DAYS,
 ) -> tuple[str, str]:
     today = date.today()
     end = parse_date(end_date, default=today, name="end_date")
@@ -146,8 +221,8 @@ def parse_range(
     )
     if start > end:
         raise GarminOwlInputError("start_date must be on or before end_date")
-    if (end - start).days + 1 > MAX_RANGE_DAYS:
-        raise GarminOwlInputError(f"date range cannot exceed {MAX_RANGE_DAYS} days")
+    if (end - start).days + 1 > max_days:
+        raise GarminOwlInputError(f"date range cannot exceed {max_days} days")
     return start.isoformat(), end.isoformat()
 
 
@@ -157,20 +232,16 @@ def validate_activity_id(activity_id: int) -> int:
     return activity_id
 
 
-def _zone_availability(hr_zones: Any, power_zones: Any) -> list[AvailabilityNotice]:
+def _zone_availability(
+    hr_zones: Any, power_zones: Any, power_read: bool = True
+) -> list[AvailabilityNotice]:
     notices = []
-    for zones, field, label in (
-        (hr_zones, "hr_zones_seconds", "HR-zone"),
-        (power_zones, "power_zones_seconds", "power-zone"),
-    ):
-        if zones is None:
-            notices.append(
-                AvailabilityNotice(
-                    field=field,
-                    status="unsupported_or_unavailable",
-                    message=f"Garmin did not provide activity {label} aggregates.",
-                )
-            )
+    if hr_zones is None:
+        notices.append(zone_notice("hr_zones_seconds", "unsupported_or_unavailable"))
+    if not power_read:
+        notices.append(zone_notice("power_zones_seconds", NOT_RECORDED))
+    elif power_zones is None:
+        notices.append(zone_notice("power_zones_seconds", "unsupported_or_unavailable"))
     return notices
 
 
@@ -197,6 +268,78 @@ class GarminTools:
             database if database is not None else (GarminDatabase() if client is None else None)
         )
         self.sync = SyncEngine(self.client, self.database) if self.database is not None else None
+
+    @property
+    def export_dir(self) -> Path:
+        """garmin-owl's own export folder, next to the local cache."""
+        base = self.database.path.parent if self.database is not None else default_db_path().parent
+        return base / "exports"
+
+    def _series_reader(self) -> SeriesReader:
+        if self.database is None or self.sync is None:
+            raise RuntimeError("daily series require the local normalized cache")
+        return SeriesReader(self.client, self.database, self.sync)
+
+    @staticmethod
+    def _past_range(
+        start_date: str | None, end_date: str | None, *, default_days: int, max_days: int
+    ) -> tuple[date, date]:
+        start, end = parse_range(start_date, end_date, default_days=default_days, max_days=max_days)
+        if date.fromisoformat(end) > date.today():
+            raise GarminOwlInputError("end_date cannot be in the future")
+        return date.fromisoformat(start), date.fromisoformat(end)
+
+    def get_daily_series(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        metrics: Sequence[str] | None = None,
+        output: str = "inline",
+    ) -> dict[str, Any]:
+        if output not in SERIES_OUTPUTS:
+            raise GarminOwlInputError(f"output must be one of: {', '.join(SERIES_OUTPUTS)}")
+        chosen = validate_metrics(metrics, error=GarminOwlInputError)
+        start, end = self._past_range(
+            start_date, end_date, default_days=DEFAULT_SERIES_DAYS, max_days=MAX_RANGE_DAYS
+        )
+        return _with_events(
+            self._series_reader().daily_series(
+                start, end, chosen, output=output, export_dir=self.export_dir
+            ),
+            start,
+            end,
+        )
+
+    def get_period_summary(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        group_by: str = "month",
+        metrics: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        if group_by not in ("month", "week"):
+            raise GarminOwlInputError("group_by must be 'month' or 'week'")
+        chosen = validate_metrics(metrics, error=GarminOwlInputError)
+        start, end = self._past_range(
+            start_date,
+            end_date,
+            default_days=DEFAULT_SUMMARY_DAYS,
+            max_days=MAX_SUMMARY_DAYS if group_by == "month" else MAX_WEEKLY_SUMMARY_DAYS,
+        )
+        return _with_events(
+            self._series_reader().period_summary(start, end, chosen, group_by), start, end
+        )
+
+    def get_vo2max_history(
+        self, start_date: str | None = None, end_date: str | None = None
+    ) -> dict[str, Any]:
+        start, end = self._past_range(
+            start_date, end_date, default_days=DEFAULT_SUMMARY_DAYS, max_days=MAX_SUMMARY_DAYS
+        )
+        return _with_events(self._series_reader().vo2max_history(start, end), start, end)
+
+    def get_data_coverage(self, refresh: bool = False) -> dict[str, Any]:
+        return data_coverage(self.client, self.database, refresh=refresh)
 
     def _ensure(self, resource: str, cdate: str) -> None:
         if self.sync is not None:
@@ -340,9 +483,27 @@ class GarminTools:
         start_date: str | None = None,
         end_date: str | None = None,
         limit: int = 20,
+        activity_types: Sequence[str] | None = None,
+        min_duration_minutes: float | None = None,
+        compact: bool = False,
+        offset: int = 0,
+        order: str = "desc",
     ) -> dict[str, Any]:
         if isinstance(limit, bool) or not 1 <= limit <= MAX_ACTIVITIES:
             raise GarminOwlInputError(f"limit must be between 1 and {MAX_ACTIVITIES}")
+        if isinstance(offset, bool) or not 0 <= offset <= MAX_ACTIVITY_OFFSET:
+            raise GarminOwlInputError(f"offset must be between 0 and {MAX_ACTIVITY_OFFSET}")
+        if order not in ("desc", "asc"):
+            raise GarminOwlInputError("order must be 'desc' (newest first) or 'asc'")
+        if min_duration_minutes is not None and (
+            isinstance(min_duration_minutes, bool) or not 0 < min_duration_minutes <= 1440
+        ):
+            raise GarminOwlInputError("min_duration_minutes must be above 0 and at most 1440")
+        types: list[str] | None = None
+        if activity_types is not None:
+            types = [str(item).strip() for item in activity_types]
+            if not 1 <= len(types) <= 20 or not all(types):
+                raise GarminOwlInputError("activity_types must hold 1-20 non-blank type keys")
         if start_date is None and end_date is None:
             # Both paths answer the same bounded question. Previously the uncached path asked
             # Garmin for the N most recent activities of all time while the cached path silently
@@ -352,37 +513,84 @@ class GarminTools:
             end = today.isoformat()
         else:
             start, end = parse_range(start_date, end_date)
-        return self._activity_list(start, end, limit)
+        return self._activity_list(
+            start,
+            end,
+            limit,
+            activity_types=types,
+            min_duration_minutes=min_duration_minutes,
+            compact=compact,
+            offset=offset,
+            order=order,
+            size_cap=True,
+        )
 
-    def _activity_list(
-        self, start: str, end: str, limit: int, activity_type: str | None = None
-    ) -> dict[str, Any]:
-        """List activities newest first, reading one more than limit to detect truncation."""
+    def _range_activities(self, start: str, end: str) -> list[ActivitySummary]:
+        """Every activity in the range, newest first."""
         if self.database is not None and self.sync is not None:
             self.sync.ensure_activities(start, end)
-            items = self.database.list_activities(
-                start, end, limit=limit + 1, activity_type=activity_type
-            )
-        else:
-            # Filter by type before applying the limit, or other types could crowd out matches.
-            items = normalize_activities(
-                self.client.activities(start, end, None if activity_type else limit + 1)
-            )
-            if activity_type:
-                items = [
-                    item
-                    for item in items
-                    if (item.activity_type or "").casefold() == activity_type.casefold()
-                ]
-        shown = items[:limit]
+            return self.database.list_activities(start, end, limit=None)
+        return normalize_activities(self.client.activities(start, end))
+
+    def _activity_list(
+        self,
+        start: str,
+        end: str,
+        limit: int,
+        activity_type: str | None = None,
+        *,
+        activity_types: list[str] | None = None,
+        min_duration_minutes: float | None = None,
+        compact: bool = False,
+        offset: int = 0,
+        order: str = "desc",
+        size_cap: bool = False,
+    ) -> dict[str, Any]:
+        """List activities, filtering before paging so other types never crowd out matches."""
+        items = self._range_activities(start, end)
+        wanted = {
+            item.casefold()
+            for item in (activity_types or ([activity_type] if activity_type else []))
+        }
+        if wanted:
+            items = [item for item in items if (item.activity_type or "").casefold() in wanted]
+        if min_duration_minutes is not None:
+            # An activity without a reported duration cannot be shown to meet the minimum.
+            items = [
+                item
+                for item in items
+                if item.duration_seconds is not None
+                and item.duration_seconds >= min_duration_minutes * 60
+            ]
+        if order == "asc":
+            items = items[::-1]
+        page = items[offset : offset + limit]
+        listed = [_compact_listing(item) if compact else item.listing() for item in page]
+        capped = False
+        if size_cap:
+            used = 0
+            for index, item in enumerate(listed):
+                used += len(json.dumps(item.compact(), ensure_ascii=False, separators=(",", ":")))
+                if used > ACTIVITY_LIST_CHAR_BUDGET and index > 0:
+                    listed, capped = listed[:index], True
+                    break
+        remaining = len(items) > offset + len(listed)
         return ActivityList(
             start_date=start,
             end_date=end,
             activity_type=activity_type,
+            activity_types=activity_types,
+            min_duration_minutes=min_duration_minutes,
+            # Echo paging only when it differs from the default, keeping old responses unchanged.
+            order=order if order != "desc" else None,
+            offset=offset or None,
             limit=limit,
-            count=len(shown),
-            truncated=len(items) > limit,
-            activities=[item.listing() for item in shown],
+            count=len(listed),
+            matched=len(items),
+            truncated=remaining,
+            next_offset=offset + len(listed) if remaining else None,
+            size_capped=capped or None,
+            activities=listed,
         ).compact()
 
     def get_activity(self, activity_id: int, refresh: bool = False) -> dict[str, Any]:
@@ -397,10 +605,17 @@ class GarminTools:
             if cached is not None:
                 return cached.compact()
             prior = self.database.get_activity(activity_id)
-        summary, hr_zones, power_zones = self.client.activity(activity_id)
+        summary = self.client.activity_summary(activity_id)
+        # Garmin answers a power-zone read for an activity without power with nothing useful,
+        # so it is skipped: a batch of class sessions then costs two reads each, not three.
+        has_power = any(
+            getattr(normalize_activity_detail(summary).summary, field) is not None
+            for field in ("average_power_w", "max_power_w", "normalized_power_w")
+        )
+        hr_zones, power_zones = self.client.activity_zones(activity_id, power=has_power)
         laps = summary.get("lapDTOs") if isinstance(summary, dict) else None
         detail = normalize_activity_detail(summary, laps, hr_zones, power_zones)
-        detail.availability.extend(_zone_availability(hr_zones, power_zones))
+        detail.availability.extend(_zone_availability(hr_zones, power_zones, has_power))
         if self.database is not None:
             if prior is not None:
                 # Garmin's detail read omits these list-only metrics; keep the listed values.
@@ -413,6 +628,97 @@ class GarminTools:
                 )
             self.database.put_activity_detail(detail)
         return detail.compact()
+
+    def get_activities_detail(
+        self, activity_ids: Sequence[int], detail: str = "compact", refresh: bool = False
+    ) -> dict[str, Any]:
+        if detail not in ("compact", "full"):
+            raise GarminOwlInputError("detail must be 'compact' or 'full'")
+        if not 1 <= len(activity_ids) <= MAX_BATCH_ACTIVITIES:
+            raise GarminOwlInputError(
+                f"activity_ids must contain between 1 and {MAX_BATCH_ACTIVITIES} IDs"
+            )
+        if len(set(activity_ids)) != len(activity_ids):
+            raise GarminOwlInputError("activity_ids must be unique")
+        for activity_id in activity_ids:
+            validate_activity_id(activity_id)
+        details: list[ActivityDetail] = []
+        failures: list[ActivityFailure] = []
+        stopped: GarminOwlError | None = None
+        used = 0
+        for activity_id in activity_ids:
+            if stopped is not None:
+                status = _FAILURE_STATUS.get(type(stopped), RETRIEVAL_FAILED)
+                failures.append(
+                    ActivityFailure(
+                        activity_id=activity_id,
+                        status=status,
+                        message=f"Not read: {stopped} Call again later with the remaining IDs.",
+                    )
+                )
+                continue
+            try:
+                item = ActivityDetail(**self.get_activity(activity_id, refresh))
+            except GarminOwlAuthError:
+                raise
+            except GarminOwlMissingDataError:
+                failures.append(
+                    ActivityFailure(
+                        activity_id=activity_id,
+                        status=MISSING_OR_UNSUPPORTED,
+                        message="Garmin has no activity with this ID for this account.",
+                    )
+                )
+                continue
+            except GarminOwlError as exc:
+                # A rate limit or outage would fail every remaining read too.
+                stopped = exc
+                failures.append(
+                    ActivityFailure(
+                        activity_id=activity_id,
+                        status=_FAILURE_STATUS.get(type(exc), RETRIEVAL_FAILED),
+                        message=f"{exc} Call again later with the remaining IDs.",
+                    )
+                )
+                continue
+            if detail == "compact":
+                item = item.model_copy(
+                    update={
+                        "summary": ActivitySummary(
+                            **{
+                                field: getattr(item.summary, field)
+                                for field in COMPACT_DETAIL_FIELDS
+                            }
+                        ),
+                        "laps": [],
+                        "power_zones_seconds": {},
+                        "availability": [
+                            notice
+                            for notice in item.availability
+                            if notice.field != "power_zones_seconds"
+                        ],
+                    }
+                )
+            size = len(json.dumps(item.compact(), ensure_ascii=False, separators=(",", ":")))
+            if details and used + size > DETAIL_BATCH_CHAR_BUDGET - _DETAIL_ENVELOPE_RESERVE:
+                # The detail is cached now, so asking again for it costs nothing.
+                failures.append(
+                    ActivityFailure(
+                        activity_id=activity_id,
+                        status="size_budget",
+                        message="Cached; left out for size. Request it again.",
+                    )
+                )
+                continue
+            used += size
+            details.append(item)
+        return ActivityDetailBatch(
+            requested=len(activity_ids),
+            returned=len(details),
+            detail=detail,
+            activities=details,
+            not_returned=failures,
+        ).compact()
 
     def get_body_composition(
         self, start_date: str | None = None, end_date: str | None = None
@@ -789,7 +1095,9 @@ class GarminTools:
         end = start + timedelta(days=6)
         items = [
             ActivitySummary(**item)
-            for item in self.get_activities(start.isoformat(), end.isoformat(), 100)["activities"]
+            for item in self._activity_list(start.isoformat(), end.isoformat(), MAX_ACTIVITIES)[
+                "activities"
+            ]
         ]
         type_counts: dict[str, int] = {}
         for item in items:
@@ -941,7 +1249,7 @@ class GarminTools:
             ),
             recent_activities=[
                 ActivitySummary(**item)
-                for item in self.get_activities(activity_start, cdate, MAX_ACTIVITIES)["activities"]
+                for item in self._activity_list(activity_start, cdate, MAX_ACTIVITIES)["activities"]
             ],
             comparisons=comparisons,
             flags=flags,

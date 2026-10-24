@@ -23,7 +23,6 @@ from .models import (
     ActivityDetail,
     ActivityLap,
     ActivitySummary,
-    AvailabilityNotice,
     BodyBatterySummary,
     BodyCompositionEntry,
     CacheInfo,
@@ -44,12 +43,13 @@ from .notices import (
     cycle_notices,
     unavailable_source_notice,
     unlabeled_status_notice,
+    zone_notice,
 )
 
 # Bump whenever stored values change meaning or format, and add a step to ``_migrate`` that
 # invalidates the affected rows. A cache is checked against this when opened and on every
 # transaction, so an update can never serve rows written in an older format.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _STALE = "1970-01-01T00:00:00+00:00"
 _logger = logging.getLogger(__name__)
 TODAY_TTL = timedelta(minutes=20)
@@ -183,6 +183,19 @@ CREATE TABLE IF NOT EXISTS cycle_metrics (
   days_until_next_phase INTEGER, predicted_cycle_length_days INTEGER,
   fertile_window_start TEXT, fertile_window_end TEXT,
   next_predicted_cycle_start TEXT, data_status TEXT, fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS daily_series (
+  date TEXT NOT NULL, metric TEXT NOT NULL, source TEXT NOT NULL, value REAL,
+  fetched_at TEXT NOT NULL, PRIMARY KEY(date, metric)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_series_source ON daily_series(source, date);
+CREATE TABLE IF NOT EXISTS activity_hr_zone_floors (
+  activity_id INTEGER NOT NULL, zone TEXT NOT NULL, low_bpm INTEGER NOT NULL,
+  PRIMARY KEY(activity_id, zone),
+  FOREIGN KEY(activity_id) REFERENCES activities(activity_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS metadata_cache (
+  key TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL
 );
 """
 
@@ -636,6 +649,13 @@ class GarminDatabase:
             connection.execute(
                 "UPDATE sleep SET skin_temperature_deviation_c=0.0 "
                 "WHERE skin_temperature_deviation_c=0"
+            )
+        if version < 10:
+            # Version 10 keeps the HR-zone floors Garmin applied to each activity. Details cached
+            # earlier never stored them, so each is re-read once when next requested.
+            connection.execute(
+                "UPDATE activities SET detail_fetched_at=? WHERE detail_fetched_at IS NOT NULL",
+                (_STALE,),
             )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -1146,6 +1166,17 @@ class GarminDatabase:
                     for index, lap in enumerate(item.laps, 1)
                 ],
             )
+            connection.execute(
+                "DELETE FROM activity_hr_zone_floors WHERE activity_id=?",
+                (item.summary.activity_id,),
+            )
+            connection.executemany(
+                "INSERT INTO activity_hr_zone_floors(activity_id,zone,low_bpm) VALUES(?,?,?)",
+                [
+                    (item.summary.activity_id, zone, low)
+                    for zone, low in (item.hr_zone_floors_bpm or {}).items()
+                ],
+            )
             for table, zones in (
                 ("activity_hr_zones", item.hr_zones_seconds),
                 ("activity_power_zones", item.power_zones_seconds),
@@ -1187,6 +1218,10 @@ class GarminDatabase:
             power = connection.execute(
                 "SELECT zone,seconds FROM activity_power_zones WHERE activity_id=?", (activity_id,)
             ).fetchall()
+            floors = connection.execute(
+                "SELECT zone,low_bpm FROM activity_hr_zone_floors WHERE activity_id=?",
+                (activity_id,),
+            ).fetchall()
         zones = {str(item["zone"]): float(item["seconds"]) for item in hr}
         summary = ActivitySummary(**dict(row), hr_zones_seconds=zones or None).model_copy(
             update={
@@ -1214,15 +1249,12 @@ class GarminDatabase:
             hr_zones_total_seconds=total,
             activity_duration_seconds=summary.duration_seconds,
             hr_zone_coverage_percent=coverage,
+            hr_zone_floors_bpm={str(item["zone"]): int(item["low_bpm"]) for item in floors} or None,
             availability=[
-                AvailabilityNotice(
-                    field=field,
-                    status=str(status),
-                    message=f"Garmin did not provide activity {label} aggregates.",
-                )
-                for field, status, label in (
-                    ("hr_zones_seconds", row["hr_zones_status"], "HR-zone"),
-                    ("power_zones_seconds", row["power_zones_status"], "power-zone"),
+                zone_notice(field, str(status))
+                for field, status in (
+                    ("hr_zones_seconds", row["hr_zones_status"]),
+                    ("power_zones_seconds", row["power_zones_status"]),
                 )
                 if status not in (None, "available")
             ],
@@ -1246,7 +1278,7 @@ class GarminDatabase:
         start_date: str,
         end_date: str,
         *,
-        limit: int = 100,
+        limit: int | None = 100,
         activity_type: str | None = None,
     ) -> list[ActivitySummary]:
         sql = "SELECT * FROM activities WHERE date BETWEEN ? AND ?"
@@ -1255,7 +1287,8 @@ class GarminDatabase:
             sql += " AND lower(activity_type)=lower(?)"
             parameters.append(activity_type)
         sql += " ORDER BY start_time DESC, activity_id DESC LIMIT ?"
-        parameters.append(limit)
+        # SQLite reads a negative limit as "no limit".
+        parameters.append(-1 if limit is None else limit)
         with self.connect() as connection:
             rows = connection.execute(sql, parameters).fetchall()
             ids = [int(row["activity_id"]) for row in rows]
@@ -1397,6 +1430,84 @@ class GarminDatabase:
             ],
         )
 
+    def series_fetched(self, source: str, start: str, end: str) -> dict[str, datetime]:
+        """When each day of ``source`` was last read by a range read, including empty days."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT date, min(fetched_at) FROM daily_series "
+                "WHERE source=? AND date BETWEEN ? AND ? GROUP BY date",
+                (source, start, end),
+            ).fetchall()
+        return {str(row[0]): datetime.fromisoformat(row[1]) for row in rows}
+
+    def put_series(
+        self,
+        source: str,
+        metrics: tuple[str, ...],
+        values: Mapping[str, Mapping[str, float | None]],
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Store one successful read of ``source`` for every day in ``values``.
+
+        A day Garmin returned nothing for is stored with NULL values, which records that it was
+        read and found empty (not that it was never read) until the day's freshness lapses.
+        """
+        stamp = _timestamp(now)
+        with self.connect() as connection:
+            connection.executemany(
+                "INSERT INTO daily_series(date,metric,source,value,fetched_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(date,metric) DO UPDATE SET source=excluded.source, "
+                "value=excluded.value, fetched_at=excluded.fetched_at",
+                [
+                    (cdate, metric, source, day.get(metric), stamp)
+                    for cdate, day in values.items()
+                    for metric in metrics
+                ],
+            )
+
+    def get_series(
+        self, start: str, end: str, metrics: tuple[str, ...]
+    ) -> dict[str, dict[str, float]]:
+        """Stored non-null values per day for the requested metrics."""
+        if not metrics:
+            return {}
+        placeholders = ",".join("?" for _ in metrics)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT date, metric, value FROM daily_series WHERE date BETWEEN ? AND ? "
+                f"AND metric IN ({placeholders}) AND value IS NOT NULL",
+                (start, end, *metrics),
+            ).fetchall()
+        result: dict[str, dict[str, float]] = {}
+        for row in rows:
+            result.setdefault(str(row[0]), {})[str(row[1])] = float(row[2])
+        return result
+
+    def get_metadata(self, key: str, *, max_age: timedelta) -> str | None:
+        """A cached account-level answer, if it is younger than ``max_age``."""
+        row = self._row("metadata_cache", "key", key)
+        if row is None:
+            return None
+        if utc_now() - datetime.fromisoformat(row["fetched_at"]) > max_age:
+            return None
+        return str(row["payload"])
+
+    def put_metadata(self, key: str, payload: str, *, now: datetime | None = None) -> None:
+        self._upsert(
+            "metadata_cache",
+            "key",
+            {"key": key, "payload": payload, "fetched_at": _timestamp(now)},
+        )
+
+    def cached_readiness_dates(self) -> tuple[str | None, str | None]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT min(date), max(date) FROM daily_metrics "
+                "WHERE training_readiness IS NOT NULL"
+            ).fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
     def _row(self, table: str, key: str, value: Any) -> sqlite3.Row | None:
         with self.connect() as connection:
             return cast(
@@ -1418,6 +1529,7 @@ class GarminDatabase:
             "cycle_metrics",
             "body_battery",
             "stress",
+            "daily_series",
         )
         with self.connect() as connection:
             counts = {
@@ -1439,6 +1551,7 @@ class GarminDatabase:
             "activity_laps",
             "activity_hr_zones",
             "activity_power_zones",
+            "activity_hr_zone_floors",
             "activities",
             "daily_metrics",
             "sleep",
@@ -1449,6 +1562,8 @@ class GarminDatabase:
             "cycle_metrics",
             "body_battery",
             "stress",
+            "daily_series",
+            "metadata_cache",
         )
         with self.connect() as connection:
             for table in tables:

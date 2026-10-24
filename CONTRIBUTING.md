@@ -42,6 +42,10 @@ server.py      MCP registration only: one thin function per tool, stdio transpor
 tools.py       GarminTools: input validation, cache-or-fetch, combining reads, availability notices
    │
    ├── sync.py       SyncEngine: "is this cached and fresh? if not, fetch, normalize, store"
+   ├── series.py     SeriesReader: long-range daily metrics via Garmin range endpoints, chunked
+   │                 to Garmin's limits, cached per day in daily_series, with a request budget
+   ├── coverage.py   get_data_coverage: bounding each metric family with a few range reads
+   ├── events.py     the user's read-only events.toml, attached to long-range answers
    ├── database.py   GarminDatabase: SQLite schema, migrations, freshness rules, typed get/put
    │
 normalize.py   raw Garmin JSON → models, defensively (every key optional, alternate key names)
@@ -72,9 +76,9 @@ These are the project's guarantees to users. A change that breaks one of them ne
 3. **Missing is not zero.** An absent value stays `None`. Totals sum only the values that are present and report how many that was (see `_sum_present`).
 4. **Explain every gap.** When a value is absent, add an `AvailabilityNotice` that says why: `missing_or_unsupported`, `retrieval_failed`, `retrieval_failed_rate_limited`, and so on. Anything `garmin-owl` calculates, rather than Garmin reporting it, gets a `derived_notice` with its formula.
 5. **A cache hit answers exactly like a live read.** If a notice or field can't be stored, rebuild it on read from what is stored, using the same builder in `notices.py`. Tests compare the live and cached responses.
-6. **Anchored to the requested date.** Never answer a question about a historical date with "latest" data. That's why the "most recent N activities" read isn't exposed.
+6. **Anchored to the requested date.** Never answer a question about a historical date with "latest" data. That's why the "most recent N activities" read isn't exposed (`get_data_coverage` uses the positional read only to find the oldest and newest activity dates).
 7. **Errors are short and safe.** `client._safe_call` turns upstream exceptions into `GarminOwlError` subclasses with fixed messages and drops the original message (`from None`). There are no automatic retries.
-8. **Bounded requests.** Every range has a maximum (366 days for ranges, 1–90 days for rolling windows, 100 activities, 48 time-series points). Invalid input raises `ValueError` with a message the model can act on.
+8. **Bounded requests.** Every range has a maximum (366 days for ranges, 1096 for monthly summaries and VO2 max history, 1–90 days for rolling windows, 100 activities or 50 activity details, 48 time-series points). Responses that could grow with the data stay under a 40k-character budget and say what they left out. A single call makes at most a budgeted number of Garmin requests, stops at the first rate limit, and reports unread days as unknown, never absent. Invalid input raises `ValueError` with a message the model can act on.
 9. **Local only.** stdio transport, no listener, no telemetry. Tool descriptions must never suggest medical advice.
 
 ## Testing

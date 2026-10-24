@@ -35,6 +35,11 @@ def test_server_registers_only_the_intended_read_tools() -> None:
         "get_recent_activities",
         "compare_activities",
         "get_cycle",
+        "get_daily_series",
+        "get_period_summary",
+        "get_data_coverage",
+        "get_activities_detail",
+        "get_vo2max_history",
     }
 
 
@@ -349,6 +354,7 @@ def test_tool_descriptions_route_document_parameters_and_time_convention() -> No
         "get_activity",
         "get_recent_activities",
         "compare_activities",
+        "get_activities_detail",
         "get_training_week",
         "get_body_composition",
     }

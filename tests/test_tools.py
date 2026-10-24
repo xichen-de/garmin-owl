@@ -68,6 +68,11 @@ class FakeGarmin:
     def get_rhr_daily(self, startdate: str, enddate: str) -> list[dict[str, Any]]:
         return self._record("get_rhr_daily", [{"calendarDate": startdate, "value": 50}])
 
+    def connectapi(self, path: str, **kwargs: Any) -> Any:
+        """Only the fixed stress-stats path is read through the generic accessor."""
+        assert path.startswith("/usersummary-service/stats/stress/daily/"), path
+        return self._record("stress_daily", [])
+
     def get_training_readiness(self, cdate: str) -> list[dict[str, Any]]:
         return self._record("get_training_readiness", [{"score": 75}])
 
@@ -87,6 +92,15 @@ class FakeGarmin:
             "get_activities",
             [{"activityId": i + 1, "activityName": f"Activity {i + 1}"} for i in range(limit)],
         )
+
+    def count_activities(self) -> int:
+        return self._record("count_activities", 0)
+
+    def get_devices(self) -> list[dict[str, Any]]:
+        return self._record("get_devices", [])
+
+    def get_max_metrics_range(self, start: str, end: str) -> list[dict[str, Any]]:
+        return self._record("get_max_metrics_range", [])
 
     def get_activities_by_date(
         self, startdate: str, enddate: str | None = None
@@ -181,7 +195,6 @@ def test_tools_call_only_explicit_reads(tools: GarminTools, fake: FakeGarmin) ->
         "get_activities_by_date",
         "get_activity",
         "get_activity_hr_in_timezones",
-        "get_activity_power_in_timezones",
         "get_weigh_ins",
         "get_heart_rate_zones",
         "get_power_zones",
@@ -190,7 +203,29 @@ def test_tools_call_only_explicit_reads(tools: GarminTools, fake: FakeGarmin) ->
     assert not any(
         word in name for name in fake.calls for word in ("set", "add", "delete", "upload", "create")
     )
-    assert fake.activity_arguments == ["123", "123", "123"]
+    # No power was recorded, so the power-zone read is skipped.
+    assert fake.activity_arguments == ["123", "123"]
+
+
+def test_power_zones_are_read_only_for_activities_with_power(tmp_path: Path) -> None:
+    class RideGarmin(FakeGarmin):
+        def get_activity(self, activity_id: str) -> dict[str, Any]:
+            self.activity_arguments.append(activity_id)
+            return self._record(
+                "get_activity", {"activityId": int(activity_id), "summaryDTO": {"avgPower": 180}}
+            )
+
+    fake = RideGarmin()
+    tools = GarminTools(_client(fake), GarminDatabase(tmp_path / "garmin.sqlite"))
+    ride = tools.get_activity(7)
+    assert "get_activity_power_in_timezones" in fake.calls
+    assert not any(item["field"] == "power_zones_seconds" for item in ride.get("availability", []))
+    walk_fake = FakeGarmin()
+    walk = GarminTools(_client(walk_fake), GarminDatabase(tmp_path / "w.sqlite"))
+    live = walk.get_activity(8)
+    notice = next(item for item in live["availability"] if item["field"] == "power_zones_seconds")
+    assert notice["status"] == "not_recorded"
+    assert walk.get_activity(8) == live, "a cache hit discloses the skipped read identically"
 
 
 class WalkingGarmin(FakeGarmin):
@@ -229,7 +264,7 @@ def test_walking_activity_optional_zone_failures_are_non_fatal() -> None:
     assert result["power_zones_seconds"] == {}
     assert "training_effect_aerobic" not in result
     assert "training_effect_anaerobic" not in result
-    assert fake.activity_arguments == ["24169622553"] * 3
+    assert fake.activity_arguments == ["24169622553"] * 2
 
 
 def test_output_stays_compact_with_large_upstream_series(tools: GarminTools) -> None:
@@ -867,7 +902,7 @@ def test_production_client_checks_authenticated_identity_before_cache_reads(
         display_name = "stale-sidecar-account"
         account = "account-a"
 
-        def connectapi(self, path: str, *, timeout: int) -> dict[str, str]:
+        def connectapi(self, path: str, **kwargs: Any) -> dict[str, str]:
             assert path == "/userprofile-service/socialProfile"
             return {"displayName": self.account}
 

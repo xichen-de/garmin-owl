@@ -77,6 +77,8 @@ Ask Claude things like:
 - "Show my 28-day recovery trend."
 - "What did my training week look like around 3 March 2025?"
 - "How has my weight changed over the last year?"
+- "How have my resting HR and HRV changed month by month since I started wearing my watch?"
+- "Show my VO2 max over the last 15 months."
 - "How does my cycle day line up with my recovery?"
 
 ## ChatGPT Desktop
@@ -144,7 +146,7 @@ ChatGPT runs its own installed copy of the plugin, so after `git pull`:
 
 ## What it can tell you
 
-Your assistant chooses among 19 read-only tools. None of them can change anything in your Garmin account.
+Your assistant chooses among 25 read-only tools. None of them can change anything in your Garmin account.
 
 **One day at a time**
 
@@ -162,13 +164,14 @@ Your assistant chooses among 19 read-only tools. None of them can change anythin
 
 | Tool | Answers |
 | --- | --- |
-| `get_activities` | Activity summaries over up to 366 days (defaults to the last 14), at most 100 results |
+| `get_activities` | Activity summaries over up to 366 days (defaults to the last 14), filtered by type or minimum duration, in full or compact form, paged with `offset`/`next_offset` |
 | `get_recent_activities` | Activities from the last 1–90 days, optionally filtered by type (for example `running`) |
-| `get_activity` | One activity's laps, training effect, HR/power zones, and your [notes and ratings](#your-own-training-notes) |
+| `get_activity` | One activity's laps, training effect, HR/power zones, the HR-zone floors in effect, and your [notes and ratings](#your-own-training-notes) |
+| `get_activities_detail` | The same details for up to 50 activities in one request (compact by default) |
 | `compare_activities` | Side-by-side metrics for 2–10 activities |
 | `get_training_week` | Mon–Sun totals and zone time, with per-metric coverage |
 | `get_training_load` | Acute/chronic load, ratio/status, load focus/targets, VO2 max, endurance, hill, acclimation |
-| `get_training_zones` | Configured HR and cycling-power zone thresholds |
+| `get_training_zones` | Today's configured HR and cycling-power zone thresholds (Garmin keeps no history; see `hr_zone_floors_bpm` on activities) |
 | `get_running_tolerance` | Running distance, impact load, tolerance, and feedback over 1–90 days |
 
 **Body, combined, and trends**
@@ -180,6 +183,17 @@ Your assistant chooses among 19 read-only tools. None of them can change anythin
 | `get_recovery_trend` | Sleep score, sleep HR, skin-temperature deviation, HRV, RHR, readiness, and Body Battery over the last 1-28 days |
 | `get_training_context` | One day's recovery plus the 7 days of training before it |
 
+**Long-range history**
+
+| Tool | Answers |
+| --- | --- |
+| `get_data_coverage` | First and last date with data per family (daily/resting HR, HRV, sleep, VO2 max, readiness, activities), activity count, and your devices |
+| `get_daily_series` | One compact row per day for up to 366 days: resting HR, HRV, sleep score/HR/duration, respiration, skin temperature, Body Battery, stress, and optionally readiness and Body Battery at wake |
+| `get_period_summary` | Per-month (up to 3 years) or per-week (up to 1 year) mean, SD, min, max and day count for the same metrics |
+| `get_vo2max_history` | Garmin's VO2 max estimates and fitness age over up to 3 years |
+
+These read Garmin's range endpoints in the largest chunks Garmin accepts and cache every day, so a year of daily metrics costs about 40 Garmin requests the first time and none afterwards. "Monthly resting HR and HRV for the last 15 months" is one `get_period_summary` call (4 Garmin requests, about 4k characters), where it used to take about 130 single-day calls. Readiness and Body Battery at wake have no range read in Garmin, so they cost one request per day and are only read when asked for (at most 60 per call; ask again to continue).
+
 ### Dates and range limits
 
 You can ask about any past date. The only limit on history is how much Garmin still returns for your account and device. Leave the date out and the tools use today. What *is* limited is how much one request covers:
@@ -187,11 +201,12 @@ You can ask about any past date. The only limit on history is how much Garmin st
 | Coverage per request | Tools |
 | --- | --- |
 | One day (any date) | The "one day at a time" tools, `get_recovery`, `get_training_load` |
-| Up to 366 days | `get_activities`, `get_body_composition` |
+| Up to 3 years (1096 days) | `get_period_summary` by month, `get_vo2max_history` |
+| Up to 366 days | `get_activities`, `get_body_composition`, `get_daily_series`, `get_period_summary` by week |
 | Up to 90 days | `get_recent_activities` (ending today), `get_running_tolerance` (ending on any date) |
 | Fixed window | `get_recovery_trend`: last 1-28 days, ending today<br>`get_training_context`: the 7 days ending on the chosen date<br>`get_training_week`: the Mon–Sun week containing the chosen date |
 
-`get_activity` and `compare_activities` take activity IDs, not dates, and `get_training_zones` reads your current settings. Activity lists return at most 100 activities per request; their `truncated` flag says when more matched.
+`get_activity`, `get_activities_detail` and `compare_activities` take activity IDs, not dates; `get_training_zones` and `get_data_coverage` take none. Activity lists return at most 100 activities per request and stop early rather than overflow the client; `truncated` says when more matched, and `next_offset` fetches the next page.
 
 You don't need to know these limits: describe the period in plain language and Claude picks the dates. For longer periods, such as several years of activities, Claude can split the question into several requests. A request that is too long returns an error that states the limit.
 
@@ -212,7 +227,29 @@ handled per timestamp. Dates (`YYYY-MM-DD`) are Garmin calendar days.
 
 ### Your own training notes
 
-Add notes to an activity's description in Garmin Connect, such as exercises, weights, or how it felt, and the assistant reads them alongside Garmin's numbers. `get_activity` returns them exactly as you typed them, together with any perceived effort and "How did you feel?" ratings you gave the activity.
+Add notes to an activity's description in Garmin Connect, such as exercises, weights, or how it felt, and the assistant reads them alongside Garmin's numbers. `get_activity` and `get_activities_detail` return them exactly as you typed them, together with any perceived effort and "How did you feel?" ratings you gave the activity. Activity lists only flag that a note exists (`has_description`).
+
+### Your own events (optional)
+
+Long-range trends often depend on context Garmin doesn't have, such as starting a medication, an illness, travel, or a training break. Write them in `~/.garmin-owl/events.toml` (or point `GARMIN_OWL_EVENTS` at another file):
+
+```toml
+[[event]]
+date = 2026-03-01
+end_date = 2026-06-30        # optional, inclusive
+category = "medication"      # optional
+label = "Started beta blocker"
+
+[[event]]
+date = 2026-01-12
+label = "Flu"
+```
+
+`get_daily_series`, `get_period_summary` and `get_vo2max_history` attach the events that overlap the requested period. `garmin-owl` only reads this file: it never writes it and never sends it anywhere except to your local MCP client with those answers. Invalid entries are skipped and named in `availability`.
+
+### Exporting a series
+
+`get_daily_series` with `output` set to `csv` or `json` writes the rows to a new file in the `exports` folder next to the cache (see below) and returns the file's path instead of the rows. The file name is chosen by `garmin-owl`; a tool call cannot write anywhere else.
 
 ## Faster answers with the local cache (optional)
 
@@ -312,6 +349,8 @@ The cache repairs itself after updates. Rows stored in an older format are re-re
 - Everything runs locally and talks to your MCP client only over local stdio. There is no network listener, telemetry, or remote database.
 - Garmin access is read-only. `garmin-owl` has no tool that can change your account.
 - Tokens stay in `~/.garminconnect`. Only normalized data, including your activity notes, is stored in the local cache, never raw Garmin responses.
+- Your events file is read-only for `garmin-owl`, and exports are written only into its own `exports` folder with owner-only permissions.
+- Device information excludes serial numbers, unit IDs and device nicknames.
 - Answers exclude credentials, account identifiers, raw GPS coordinates, and private cycle logs.
 - Health summaries are informational, **not medical advice**.
 
@@ -325,7 +364,7 @@ To remove `garmin-owl`:
 
 1. Uninstall the extension in Claude Desktop. For ChatGPT Desktop, uninstall **Garmin Owl** in the Plugins Directory, then run `codex plugin marketplace remove garmin-owl-local`.
 2. Delete your `garmin-owl` folder.
-3. Optionally delete the cache file listed above.
+3. Optionally delete the cache file listed above, its `exports` folder, and `~/.garmin-owl/events.toml`.
 4. Delete `~/.garminconnect` only if no other Garmin tool uses those tokens.
 
 ## Contributing

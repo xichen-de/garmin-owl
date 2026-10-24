@@ -17,3 +17,15 @@ def berlin_time_zone() -> Iterator[None]:
     else:
         os.environ["TZ"] = previous
     time.tzset()
+
+
+@pytest.fixture(autouse=True)
+def no_user_events(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Never read the developer's own events file during tests."""
+    previous = os.environ.get("GARMIN_OWL_EVENTS")
+    os.environ["GARMIN_OWL_EVENTS"] = str(tmp_path_factory.mktemp("events") / "events.toml")
+    yield
+    if previous is None:
+        os.environ.pop("GARMIN_OWL_EVENTS", None)
+    else:
+        os.environ["GARMIN_OWL_EVENTS"] = previous

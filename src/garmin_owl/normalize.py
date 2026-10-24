@@ -556,6 +556,18 @@ def _zones(raw: Any) -> dict[str, float]:
     return result
 
 
+def _zone_floors(raw: Any) -> dict[str, int] | None:
+    """Garmin's zoneLowBoundary per zone, as applied to this activity."""
+    floors = {}
+    for index, item in enumerate(_list(raw), 1):
+        data = _map(item)
+        low = _integer(data.get("zoneLowBoundary"))
+        if low is not None and low > 0:
+            label = _text(_first(data, "zoneNumber", "zone")) or str(index)
+            floors[f"zone_{label}"] = low
+    return floors or None
+
+
 def normalize_activity_detail(
     raw: Any, laps_raw: Any = None, hr_zones_raw: Any = None, power_zones_raw: Any = None
 ) -> ActivityDetail:
@@ -608,6 +620,7 @@ def normalize_activity_detail(
             if zone_total and summary.duration_seconds
             else None
         ),
+        hr_zone_floors_bpm=_zone_floors(hr_zones_raw),
     )
 
 
@@ -890,6 +903,44 @@ def normalize_resting_hr_range(raw: Any) -> dict[str, int]:
         value = _integer(data.get("value"))
         if cdate is not None and value is not None:
             result[cdate] = value
+    return result
+
+
+def normalize_stress_range(raw: Any) -> dict[str, int]:
+    """Garmin's per-day overall stress, the same figure as the daily summary's average.
+
+    Verified live: settled days match ``averageStressLevel`` from the daily summary exactly.
+    """
+    result: dict[str, int] = {}
+    for item in _list(raw):
+        root = _map(item)
+        cdate = _text(root.get("calendarDate"))
+        value = _integer(_map(root.get("values")).get("overallStressLevel"))
+        # Garmin uses negative levels for "not enough data", never as a measurement.
+        if cdate is not None and value is not None and value >= 0:
+            result[cdate] = value
+    return result
+
+
+def normalize_vo2max_range(raw: Any) -> dict[str, dict[str, float | None]]:
+    """Garmin's max-metrics history: VO2 max per sport family and fitness age, per day.
+
+    ``generic`` is Garmin's running/walking estimate (the payload does not say which of the
+    two) and ``cycling`` its cycling estimate. Days without an update are absent.
+    """
+    result: dict[str, dict[str, float | None]] = {}
+    for item in _list(raw):
+        root = _map(item)
+        for sport in ("generic", "cycling"):
+            entry = _map(root.get(sport))
+            cdate = _text(entry.get("calendarDate"))
+            value = _rounded(_first(entry, "vo2MaxPreciseValue", "vo2MaxValue"), 1)
+            if cdate is None or value is None or value <= 0:
+                continue
+            day = result.setdefault(cdate[:10], {})
+            day[f"vo2max_{sport}"] = value
+            if sport == "generic":
+                day["fitness_age"] = _rounded(entry.get("fitnessAge"), 1)
     return result
 
 

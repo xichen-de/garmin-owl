@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "garmin-owl",
   "display_name": "Garmin Owl",
-  "version": "0.2.7",
+  "version": "0.3.0",
   "description": "Local-only, read-only access to your Garmin Connect health and activity data.",
   "long_description": "Garmin Owl runs entirely as a local stdio MCP server. It reads your existing Garmin Connect data on demand through the unofficial python-garminconnect client. It has no write tools, public listener, telemetry, analytics, remote database, or bundled credentials. Garmin session tokens remain in the standard local ~/.garminconnect store.",
   "author": {
@@ -53,11 +53,11 @@
     },
     {
       "name": "get_activities",
-      "description": "Read Garmin activities in a date range of up to 366 days (default: last 14), with a count and truncation flag."
+      "description": "Read Garmin activities in a date range of up to 366 days (default: last 14), filtered by type or minimum duration, in full or compact form, paged with offset/next_offset."
     },
     {
       "name": "get_activity",
-      "description": "Read details for one Garmin activity, including the user's own notes and effort ratings, without location tracks or raw streams."
+      "description": "Read details for one Garmin activity, including the user's own notes, effort ratings and the HR-zone floors in effect, without location tracks or raw streams."
     },
     {
       "name": "get_body_composition",
@@ -98,6 +98,26 @@
     {
       "name": "get_cycle",
       "description": "Read normalized cycle phase and timing without notes, symptoms, or raw daily logs."
+    },
+    {
+      "name": "get_daily_series",
+      "description": "Read one compact row per day of resting HR, HRV, sleep, stress and Body Battery for up to 366 days, from Garmin's range endpoints."
+    },
+    {
+      "name": "get_period_summary",
+      "description": "Summarize Garmin daily metrics per month or week (mean, SD, min, max, day count) over up to three years in one call."
+    },
+    {
+      "name": "get_data_coverage",
+      "description": "Find the first and last date with Garmin data per metric family, the activity count, and the user's devices."
+    },
+    {
+      "name": "get_activities_detail",
+      "description": "Read details for up to 50 activities at once: notes, effort ratings, recovery HR, zone time and the HR-zone floors in effect for each."
+    },
+    {
+      "name": "get_vo2max_history",
+      "description": "Read Garmin's VO2 max estimates (running/walking and cycling) and fitness age over up to three years."
     }
   ],
   "tools_generated": false,
