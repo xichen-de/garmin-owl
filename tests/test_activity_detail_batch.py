@@ -160,3 +160,57 @@ def test_invalid_batches_fail_before_reading_garmin(
     with pytest.raises(GarminOwlInputError, match=message):
         _tools(fake, tmp_path).get_activities_detail(ids)
     assert fake.calls == []
+
+
+class ZoneFailureGarmin(ClassesGarmin):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    def get_activity_hr_in_timezones(self, activity_id: str) -> list[dict[str, Any]]:
+        self.calls.append("get_activity_hr_in_timezones")
+        raise self.error
+
+
+def test_a_rate_limited_zone_read_stops_the_batch_and_caches_nothing(tmp_path: Path) -> None:
+    fake = ZoneFailureGarmin(GarminConnectTooManyRequestsError("429"))
+    tools = _tools(fake, tmp_path)
+    result = tools.get_activities_detail([1, 2, 3, 4, 5])
+    assert result["returned"] == 0
+    assert [item["status"] for item in result["not_returned"]] == [
+        "retrieval_failed_rate_limited"
+    ] * 5
+    assert len(fake.calls) == 2, "one summary and one zone read, then stop"
+    assert tools.database is not None
+    assert tools.database.get_activity(1, require_detail=True) is None
+
+
+def test_an_outage_during_a_zone_read_is_not_cached_as_absent_zones(tmp_path: Path) -> None:
+    from garminconnect import GarminConnectConnectionError
+
+    from garmin_owl.client import GarminOwlServerError
+
+    fake = ZoneFailureGarmin(GarminConnectConnectionError("API Error 503"))
+    tools = _tools(fake, tmp_path)
+    with pytest.raises(GarminOwlServerError):
+        tools.get_activity(1)
+    assert tools.database is not None
+    assert tools.database.get_activity(1, require_detail=True) is None
+
+
+def test_authentication_failure_during_a_zone_read_propagates(tmp_path: Path) -> None:
+    from garminconnect import GarminConnectAuthenticationError
+
+    from garmin_owl.client import GarminOwlAuthError
+
+    fake = ZoneFailureGarmin(GarminConnectAuthenticationError("401"))
+    with pytest.raises(GarminOwlAuthError):
+        _tools(fake, tmp_path).get_activities_detail([1, 2])
+
+
+def test_an_activity_without_zone_data_still_returns_its_detail(tmp_path: Path) -> None:
+    fake = ZoneFailureGarmin(GarminConnectNotFoundError("404"))
+    result = _tools(fake, tmp_path).get_activities_detail([1, 2])
+    assert result["returned"] == 2
+    statuses = {item["field"]: item["status"] for item in result["activities"][0]["availability"]}
+    assert statuses["hr_zones_seconds"] == "unsupported_or_unavailable"

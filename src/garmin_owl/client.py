@@ -89,6 +89,10 @@ class GarminOwlMissingDataError(GarminOwlError):
     pass
 
 
+# Zone reads that fail this way mean the activity or device has no such breakdown.
+_ZONES_ABSENT = (GarminOwlMissingDataError, GarminOwlRequestError, GarminOwlResponseError)
+
+
 # Garmin's daily Body Battery report answers HTTP 400 for ranges longer than 31 days
 # (verified live; 31 succeeds, 32 fails).
 BODY_BATTERY_RANGE_DAYS = 31
@@ -299,15 +303,19 @@ class GarminDataClient:
 
     def activity_zones(self, activity_id: int, *, power: bool = True) -> tuple[Any, Any]:
         """Read zone aggregates; ``power=False`` skips the power read for activities without
-        power, which Garmin answers with nothing useful."""
+        power, which Garmin answers with nothing useful.
+
+        Only answers meaning "this activity has no such breakdown" are absorbed as None. A rate
+        limit, outage or authentication failure propagates, so a detail missing its zones is
+        never returned or cached as if Garmin had none.
+        """
         activity_key = str(activity_id)
-        # These are useful but not supported for every activity/device. Absence is not fatal.
         try:
             hr_zones = self._read(
                 "activity HR zones",
                 lambda: self.__api.get_activity_hr_in_timezones(activity_key),
             )
-        except GarminOwlError:
+        except _ZONES_ABSENT:
             hr_zones = None
         power_zones = None
         if power:
@@ -316,7 +324,7 @@ class GarminDataClient:
                     "activity power zones",
                     lambda: self.__api.get_activity_power_in_timezones(activity_key),
                 )
-            except GarminOwlError:
+            except _ZONES_ABSENT:
                 power_zones = None
         return hr_zones, power_zones
 
