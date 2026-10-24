@@ -893,7 +893,7 @@ def get_data_coverage(
     has no Garmin range read, so its dates cover locally cached days only (method says so).
     Devices list model, status, registration date and primary flag; never serial numbers.
 
-    Costs about a dozen Garmin requests and is cached for 24 hours.
+    Costs about 20 Garmin requests and a complete answer is cached for 24 hours.
 
     Requires saved local Garmin authentication (garmin-owl-auth). Reads Garmin and may update
     the local cache; never changes your Garmin account. Garmin failures are not retried

@@ -99,7 +99,9 @@ def test_coverage_finds_each_family_with_few_requests_and_caches(tmp_path: Path)
     assert families["daily_summary"]["first_date"] == STRAY.isoformat()
     assert families["daily_summary"]["regular_from"] == FIRST.isoformat()
     assert families["daily_summary"]["last_date"] == TODAY.isoformat()
-    assert families["hrv"]["first_date"] == (FIRST + timedelta(days=7)).isoformat()
+    # HRV is searched on its own, so the isolated early night is found too.
+    assert families["hrv"]["first_date"] == STRAY.isoformat()
+    assert families["hrv"]["regular_from"] == (FIRST + timedelta(days=7)).isoformat()
     assert families["sleep"]["first_date"] == (FIRST + timedelta(days=7)).isoformat()
     assert families["vo2_max"]["first_date"] == (FIRST + timedelta(days=3)).isoformat()
     assert families["activities"] == {
@@ -110,7 +112,7 @@ def test_coverage_finds_each_family_with_few_requests_and_caches(tmp_path: Path)
     }
     assert result["activity_count"] == 478
     assert "training_readiness" not in families, "no cached readiness means no claimed dates"
-    assert len(fake.calls) <= 16, fake.calls
+    assert len(fake.calls) <= 18, fake.calls
     calls = len(fake.calls)
     assert tools.get_data_coverage() == result
     assert len(fake.calls) == calls
@@ -156,9 +158,13 @@ def test_an_account_without_data_reports_no_families(tmp_path: Path) -> None:
         def get_rhr_daily(self, startdate: str, enddate: str) -> list[dict[str, Any]]:
             return self._record("get_rhr_daily", [])
 
+        def get_hrv_data_range(self, startdate: str, enddate: str) -> dict[str, Any]:
+            return self._record("get_hrv_data_range", {"hrvSummaries": []})
+
     fake = Empty()
     result = _tools(fake, tmp_path).get_data_coverage()
     assert result["families"] == []
+    assert "availability" not in result
     assert fake.calls.count("get_rhr_daily") == 10
 
 
@@ -189,3 +195,62 @@ def test_regular_from_skips_isolated_early_records() -> None:
     days = ["2024-12-27", "2025-01-03", "2025-08-02", "2025-08-03", "2025-08-05", "2025-08-06"]
     assert regular_from(days) == "2025-08-02"
     assert regular_from(["2025-01-01", "2025-02-01"]) is None
+
+
+class Vo2OnlyGarmin(AccountGarmin):
+    """No resting-HR history at all, but VO2 max estimates long before and after FIRST."""
+
+    def get_rhr_daily(self, startdate: str, enddate: str) -> list[dict[str, Any]]:
+        return self._record("get_rhr_daily", [])
+
+    def get_max_metrics_range(self, start: str, end: str) -> list[dict[str, Any]]:
+        days = [FIRST - timedelta(days=500), TODAY - timedelta(days=10)]
+        return self._record(
+            "get_max_metrics_range",
+            [
+                {"generic": {"calendarDate": day.isoformat(), "vo2MaxValue": 40}}
+                for day in days
+                if start <= day.isoformat() <= end
+            ],
+        )
+
+
+def test_vo2_coverage_does_not_depend_on_resting_hr_history(tmp_path: Path) -> None:
+    result = _tools(Vo2OnlyGarmin(), tmp_path).get_data_coverage()
+    families = {item["family"]: item for item in result["families"]}
+    assert "daily_summary" not in families
+    assert families["vo2_max"]["first_date"] == (FIRST - timedelta(days=500)).isoformat()
+    sleep = next(item for item in result["availability"] if item["field"] == "sleep")
+    assert sleep["status"] == "not_searched"
+
+
+def test_vo2_estimates_before_regular_wear_are_included(tmp_path: Path) -> None:
+    class EarlyVo2(AccountGarmin):
+        def get_max_metrics_range(self, start: str, end: str) -> list[dict[str, Any]]:
+            day = STRAY - timedelta(days=30)
+            rows = [{"generic": {"calendarDate": day.isoformat(), "vo2MaxValue": 39}}]
+            return self._record(
+                "get_max_metrics_range", rows if start <= day.isoformat() <= end else []
+            )
+
+    result = _tools(EarlyVo2(), tmp_path).get_data_coverage()
+    families = {item["family"]: item for item in result["families"]}
+    assert families["vo2_max"]["first_date"] == (STRAY - timedelta(days=30)).isoformat()
+
+
+def test_reaching_the_search_limit_is_disclosed_and_not_cached(tmp_path: Path) -> None:
+    class Endless(AccountGarmin):
+        def get_max_metrics_range(self, start: str, end: str) -> list[dict[str, Any]]:
+            return self._record(
+                "get_max_metrics_range",
+                [{"generic": {"calendarDate": start, "vo2MaxValue": 40}}],
+            )
+
+    fake = Endless()
+    tools = _tools(fake, tmp_path)
+    result = tools.get_data_coverage()
+    notice = next(item for item in result["availability"] if item["field"] == "vo2_max")
+    assert notice["status"] == "search_limit_reached"
+    calls = len(fake.calls)
+    tools.get_data_coverage()
+    assert len(fake.calls) > calls, "an open-ended answer is not cached as complete"

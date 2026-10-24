@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, timedelta
-from functools import partial
 from typing import Any
 
 from .client import (
@@ -32,7 +31,8 @@ from .series import HRV_RANGE_DAYS, RESTING_HR_RANGE_DAYS, SLEEP_RANGE_DAYS
 
 COVERAGE_KEY = "data_coverage"
 COVERAGE_MAX_AGE = timedelta(hours=24)
-MAX_HISTORY_WINDOWS = 10  # ten years of 366-day resting-HR windows
+MAX_HISTORY_WINDOWS = 10  # ten years of 366-day windows
+EMPTY_WINDOWS_TO_STOP = 2  # about two years without data ends a backward search
 MAX_SLEEP_WINDOWS = 13  # about a year of 28-day sleep windows from each end
 VO2_RANGE_DAYS = 366
 ACTIVITY_PAGE = 20
@@ -97,22 +97,40 @@ class CoverageReader:
             )
             return None
 
-    def _wellness(self, today: date) -> list[str]:
-        """Resting-HR days, scanning backwards until a whole window comes back empty."""
+    def _backward(
+        self, family: str, today: date, size: int, read: Callable[[str, str], list[str]]
+    ) -> list[str]:
+        """Every day ``read`` reports, scanning back from today in ``size``-day windows until
+        ``EMPTY_WINDOWS_TO_STOP`` consecutive windows are empty after data was found, so a single
+        year without, say, outdoor VO2 estimates does not hide the years before it.
+
+        If the search limit is reached while windows still hold data, earlier days may exist:
+        that is disclosed, which also keeps the answer out of the 24-hour cache.
+        """
         found: list[str] = []
+        empty = 0
         end = today
         for _ in range(MAX_HISTORY_WINDOWS):
-            start = end - timedelta(days=RESTING_HR_RANGE_DAYS - 1)
-            days = sorted(
-                normalize_resting_hr_range(
-                    self.client.resting_hr_range(start.isoformat(), end.isoformat())
-                )
-            )
-            if not days and found:
-                break
+            start = end - timedelta(days=size - 1)
+            days = sorted(read(start.isoformat(), end.isoformat()))
+            empty = empty + 1 if not days else 0
+            if found and empty >= EMPTY_WINDOWS_TO_STOP:
+                return found
             found = days + found
             end = start - timedelta(days=1)
+        if found:
+            self.notices.append(
+                AvailabilityNotice(
+                    field=family,
+                    status="search_limit_reached",
+                    message=f"{family} data reaches the search limit of {MAX_HISTORY_WINDOWS} "
+                    f"windows back from today; its first_date is unknown and may be earlier.",
+                )
+            )
         return found
+
+    def _rhr_days(self, start: str, end: str) -> list[str]:
+        return list(normalize_resting_hr_range(self.client.resting_hr_range(start, end)))
 
     def _scan(
         self,
@@ -164,7 +182,15 @@ class CoverageReader:
     def read(self) -> DataCoverage:
         today = date.today()
         families: list[CoverageFamily] = []
-        wellness = self._guard("daily_summary", lambda: self._wellness(today)) or []
+        wellness = (
+            self._guard(
+                "daily_summary",
+                lambda: self._backward(
+                    "daily_summary", today, RESTING_HR_RANGE_DAYS, self._rhr_days
+                ),
+            )
+            or []
+        )
         if wellness:
             families.append(
                 CoverageFamily(
@@ -174,28 +200,50 @@ class CoverageReader:
                     days_with_data=len(wellness),
                     regular_from=regular_from(wellness),
                     method="Days with a Garmin resting heart rate, read in 366-day windows "
-                    "back from today until a whole window was empty.",
+                    "back from today until two consecutive windows were empty.",
                 )
             )
-            # Scan the other families from where regular wear began, not from a stray early day.
+        # HRV and VO2 max have cheap 366-day range reads, so each is searched on its own rather
+        # than from the wellness span: estimates before regular wear, or without any resting-HR
+        # history, are still found.
+        hrv = (
+            self._guard("hrv", lambda: self._backward("hrv", today, HRV_RANGE_DAYS, self._hrv_days))
+            or []
+        )
+        if hrv:
+            families.append(
+                CoverageFamily(
+                    family="hrv",
+                    first_date=hrv[0],
+                    last_date=hrv[-1],
+                    days_with_data=len(hrv),
+                    regular_from=regular_from(hrv),
+                    method="Nights with a Garmin HRV average, read in 366-day windows back from "
+                    "today until two consecutive windows were empty.",
+                )
+            )
+        vo2 = (
+            self._guard(
+                "vo2_max",
+                lambda: self._backward("vo2_max", today, VO2_RANGE_DAYS, self._vo2_window),
+            )
+            or []
+        )
+        if vo2:
+            families.append(
+                CoverageFamily(
+                    family="vo2_max",
+                    first_date=vo2[0],
+                    last_date=vo2[-1],
+                    days_with_data=len(vo2),
+                    method="Days on which Garmin's max-metrics history has a VO2 max, read in "
+                    "366-day windows back from today until two consecutive windows were empty.",
+                )
+            )
+        if wellness:
+            # Sleep reads cover only 28 days, so a ten-year backward search would cost about
+            # 130 requests; it is bounded from where regular wear began instead, and says so.
             first = date.fromisoformat(regular_from(wellness) or wellness[0])
-            forward = list(_windows(first, today, HRV_RANGE_DAYS))
-            hrv_first = self._guard(
-                "hrv", lambda: self._scan(forward, self._hrv_days, len(forward))
-            )
-            hrv_last = self._guard(
-                "hrv",
-                lambda: self._scan(reversed(forward), self._hrv_days, len(forward), last=True),
-            )
-            if hrv_first or hrv_last:
-                families.append(
-                    CoverageFamily(
-                        family="hrv",
-                        first_date=hrv_first,
-                        last_date=hrv_last,
-                        method="Nights with a Garmin HRV average, from the first wellness day.",
-                    )
-                )
             sleep_windows = list(_windows(first, today, SLEEP_RANGE_DAYS))
             sleep_first = self._guard(
                 "sleep", lambda: self._scan(sleep_windows, self._sleep_days, MAX_SLEEP_WINDOWS)
@@ -212,27 +260,20 @@ class CoverageReader:
                         family="sleep",
                         first_date=sleep_first,
                         last_date=sleep_last,
-                        method="Nights with a Garmin sleep score or duration, searched up to "
-                        "a year inward from each end of the wellness span.",
+                        method="Nights with a Garmin sleep score or duration, searched up to a "
+                        "year inward from each end of the span starting at the resting-HR "
+                        "regular_from; isolated nights before that are not searched.",
                     )
                 )
-            vo2: list[str] = []
-            for start, end in _windows(first, today, VO2_RANGE_DAYS):
-                window = self._guard("vo2_max", partial(self._vo2_window, start, end))
-                if window is None:
-                    vo2 = []
-                    break
-                vo2.extend(window)
-            if vo2:
-                families.append(
-                    CoverageFamily(
-                        family="vo2_max",
-                        first_date=vo2[0],
-                        last_date=vo2[-1],
-                        days_with_data=len(vo2),
-                        method="Days on which Garmin's max-metrics history has a VO2 max.",
-                    )
+        elif hrv:
+            self.notices.append(
+                AvailabilityNotice(
+                    field="sleep",
+                    status="not_searched",
+                    message="Sleep coverage is searched from the resting-HR history, which "
+                    "Garmin did not return, so sleep dates are unknown, not absent.",
                 )
+            )
         if self.database is not None:
             ready_first, ready_last = self.database.cached_readiness_dates()
             if ready_first:
