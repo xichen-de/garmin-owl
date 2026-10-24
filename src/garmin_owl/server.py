@@ -46,7 +46,7 @@ from .tools import GarminOwlInputError, GarminTools
 
 mcp = MCPServer(
     "garmin-owl",
-    version="0.3.0",
+    version="0.3.1",
     instructions=(
         "Read-only access to the local user's Garmin Connect data. "
         "Never claim this is medical advice. No mutation tools exist. "
