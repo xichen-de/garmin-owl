@@ -556,6 +556,18 @@ def _zones(raw: Any) -> dict[str, float]:
     return result
 
 
+def _zone_floors(raw: Any) -> dict[str, int] | None:
+    """Garmin's zoneLowBoundary per zone, as applied to this activity."""
+    floors = {}
+    for index, item in enumerate(_list(raw), 1):
+        data = _map(item)
+        low = _integer(data.get("zoneLowBoundary"))
+        if low is not None and low > 0:
+            label = _text(_first(data, "zoneNumber", "zone")) or str(index)
+            floors[f"zone_{label}"] = low
+    return floors or None
+
+
 def normalize_activity_detail(
     raw: Any, laps_raw: Any = None, hr_zones_raw: Any = None, power_zones_raw: Any = None
 ) -> ActivityDetail:
@@ -608,6 +620,7 @@ def normalize_activity_detail(
             if zone_total and summary.duration_seconds
             else None
         ),
+        hr_zone_floors_bpm=_zone_floors(hr_zones_raw),
     )
 
 

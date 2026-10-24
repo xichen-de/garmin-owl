@@ -284,6 +284,31 @@ class ActivityDetail(OwlModel):
     hr_zones_total_seconds: float | None = None
     activity_duration_seconds: float | None = None
     hr_zone_coverage_percent: float | None = None
+    hr_zone_floors_bpm: dict[str, int] | None = Field(
+        default=None,
+        description="Lower bound in bpm of each HR zone as Garmin applied it to this activity. "
+        "Garmin keeps no history of max HR or zone settings, so these per-activity floors are "
+        "the only record of what the zones were at the time.",
+    )
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
+
+
+class ActivityFailure(OwlModel):
+    activity_id: int
+    status: str
+    message: str
+
+
+class ActivityDetailBatch(OwlModel):
+    requested: int
+    returned: int
+    detail: str = Field(description="compact or full, as requested.")
+    activities: list[ActivityDetail] = Field(default_factory=list)
+    not_returned: list[ActivityFailure] = Field(
+        default_factory=list,
+        description="IDs without a detail in this response and why: not found, a failed read, "
+        "or left out to keep the response small (call again with just those IDs).",
+    )
     availability: list[AvailabilityNotice] = Field(default_factory=list)
 
 

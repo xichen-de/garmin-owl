@@ -293,9 +293,14 @@ class GarminDataClient:
             "max metrics range", lambda: self.__api.get_max_metrics_range(startdate, enddate)
         )
 
-    def activity(self, activity_id: int) -> tuple[Any, Any, Any]:
+    def activity_summary(self, activity_id: int) -> Any:
         activity_key = str(activity_id)
-        summary = self._read("activity detail", lambda: self.__api.get_activity(activity_key))
+        return self._read("activity detail", lambda: self.__api.get_activity(activity_key))
+
+    def activity_zones(self, activity_id: int, *, power: bool = True) -> tuple[Any, Any]:
+        """Read zone aggregates; ``power=False`` skips the power read for activities without
+        power, which Garmin answers with nothing useful."""
+        activity_key = str(activity_id)
         # These are useful but not supported for every activity/device. Absence is not fatal.
         try:
             hr_zones = self._read(
@@ -304,14 +309,20 @@ class GarminDataClient:
             )
         except GarminOwlError:
             hr_zones = None
-        try:
-            power_zones = self._read(
-                "activity power zones",
-                lambda: self.__api.get_activity_power_in_timezones(activity_key),
-            )
-        except GarminOwlError:
-            power_zones = None
-        return summary, hr_zones, power_zones
+        power_zones = None
+        if power:
+            try:
+                power_zones = self._read(
+                    "activity power zones",
+                    lambda: self.__api.get_activity_power_in_timezones(activity_key),
+                )
+            except GarminOwlError:
+                power_zones = None
+        return hr_zones, power_zones
+
+    def activity(self, activity_id: int) -> tuple[Any, Any, Any]:
+        summary = self.activity_summary(activity_id)
+        return (summary, *self.activity_zones(activity_id))
 
     def body_composition(self, startdate: str, enddate: str) -> Any:
         return self._read("body composition", lambda: self.__api.get_weigh_ins(startdate, enddate))

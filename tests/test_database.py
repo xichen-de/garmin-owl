@@ -571,3 +571,28 @@ def test_schema_eight_cache_corrects_units_zeros_and_rounding_in_place(tmp_path:
     assert summary.average_respiration == 26.9
     sleep = migrated.get_sleep("2026-10-07")
     assert sleep is not None and str(sleep.skin_temperature_deviation_c) == "0.0"
+
+
+def test_schema_nine_cache_rereads_details_once_to_gain_zone_floors(tmp_path: Path) -> None:
+    path = tmp_path / "cache.sqlite"
+    database = GarminDatabase(path)
+    database.put_activity_detail(
+        ActivityDetail(
+            summary=ActivitySummary(activity_id=1, start_time="2025-10-05T08:00:00+02:00"),
+            hr_zones_seconds={"zone_1": 60.0},
+        )
+    )
+    assert database.get_activity(1, require_detail=True) is not None
+    database.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA user_version = 9")
+        connection.execute("DROP TABLE activity_hr_zone_floors")
+        connection.execute("DROP TABLE daily_series")
+        connection.execute("DROP TABLE metadata_cache")
+
+    migrated = GarminDatabase(path)
+    assert migrated.get_activity(1, require_detail=True) is None, "the detail is re-read once"
+    kept = migrated.get_activity(1)
+    assert kept is not None and kept.hr_zones_seconds == {"zone_1": 60.0}
+    assert migrated.series_fetched("resting_hr_range", "2025-01-01", "2025-12-31") == {}
+    assert migrated.get_metadata("data_coverage", max_age=timedelta(days=1)) is None

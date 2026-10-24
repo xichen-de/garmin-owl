@@ -116,3 +116,19 @@ def partial_coverage_notice(
         status="partial_coverage",
         message=f"{detail} Covered {covered} of {total} Garmin records.",
     )
+
+
+NOT_RECORDED = "not_recorded"
+_ZONE_LABELS = {"hr_zones_seconds": "HR-zone", "power_zones_seconds": "power-zone"}
+
+
+def zone_notice(field: str, status: str) -> AvailabilityNotice:
+    """Why an activity's zone breakdown is absent; identical for live reads and cache hits."""
+    label = _ZONE_LABELS.get(field, field)
+    if status == NOT_RECORDED:
+        message = (
+            f"Garmin recorded no power for this activity, so its {label} breakdown was not read."
+        )
+    else:
+        message = f"Garmin did not provide activity {label} aggregates."
+    return AvailabilityNotice(field=field, status=status, message=message)

@@ -24,6 +24,8 @@ from .database import GarminDatabase, default_db_path
 from .models import (
     ActivityComparison,
     ActivityDetail,
+    ActivityDetailBatch,
+    ActivityFailure,
     ActivityList,
     ActivitySummary,
     AvailabilityNotice,
@@ -65,9 +67,11 @@ from .normalize import (
 )
 from .notices import (
     MISSING_OR_UNSUPPORTED,
+    NOT_RECORDED,
     RATE_LIMITED,
     RETRIEVAL_FAILED,
     partial_coverage_notice,
+    zone_notice,
 )
 from .series import SeriesReader, validate_metrics
 from .sync import SyncEngine, dates_between, read_training_load_sources
@@ -81,6 +85,27 @@ MAX_ACTIVITY_OFFSET = 10_000
 # Character budget for one activity page as the client receives it (compact JSON). A page of
 # 100 full listings reached 60-68k characters and overflowed client tool-output limits.
 ACTIVITY_LIST_CHAR_BUDGET = 40_000
+MAX_BATCH_ACTIVITIES = 50
+DETAIL_BATCH_CHAR_BUDGET = 40_000
+# Room kept for the envelope and the not_returned entries of up to 50 IDs.
+_DETAIL_ENVELOPE_RESERVE = 4_000
+COMPACT_DETAIL_FIELDS = (
+    "activity_id",
+    "name",
+    "start_time",
+    "activity_type",
+    "duration_seconds",
+    "distance_m",
+    "calories_kcal",
+    "average_hr_bpm",
+    "max_hr_bpm",
+    "recovery_hr_bpm",
+    "activity_training_load",
+    "vo2_max",
+    "description",
+    "perceived_effort",
+    "feel",
+)
 COMPACT_ACTIVITY_FIELDS = (
     "activity_id",
     "name",
@@ -193,20 +218,16 @@ def validate_activity_id(activity_id: int) -> int:
     return activity_id
 
 
-def _zone_availability(hr_zones: Any, power_zones: Any) -> list[AvailabilityNotice]:
+def _zone_availability(
+    hr_zones: Any, power_zones: Any, power_read: bool = True
+) -> list[AvailabilityNotice]:
     notices = []
-    for zones, field, label in (
-        (hr_zones, "hr_zones_seconds", "HR-zone"),
-        (power_zones, "power_zones_seconds", "power-zone"),
-    ):
-        if zones is None:
-            notices.append(
-                AvailabilityNotice(
-                    field=field,
-                    status="unsupported_or_unavailable",
-                    message=f"Garmin did not provide activity {label} aggregates.",
-                )
-            )
+    if hr_zones is None:
+        notices.append(zone_notice("hr_zones_seconds", "unsupported_or_unavailable"))
+    if not power_read:
+        notices.append(zone_notice("power_zones_seconds", NOT_RECORDED))
+    elif power_zones is None:
+        notices.append(zone_notice("power_zones_seconds", "unsupported_or_unavailable"))
     return notices
 
 
@@ -558,10 +579,17 @@ class GarminTools:
             if cached is not None:
                 return cached.compact()
             prior = self.database.get_activity(activity_id)
-        summary, hr_zones, power_zones = self.client.activity(activity_id)
+        summary = self.client.activity_summary(activity_id)
+        # Garmin answers a power-zone read for an activity without power with nothing useful,
+        # so it is skipped: a batch of class sessions then costs two reads each, not three.
+        has_power = any(
+            getattr(normalize_activity_detail(summary).summary, field) is not None
+            for field in ("average_power_w", "max_power_w", "normalized_power_w")
+        )
+        hr_zones, power_zones = self.client.activity_zones(activity_id, power=has_power)
         laps = summary.get("lapDTOs") if isinstance(summary, dict) else None
         detail = normalize_activity_detail(summary, laps, hr_zones, power_zones)
-        detail.availability.extend(_zone_availability(hr_zones, power_zones))
+        detail.availability.extend(_zone_availability(hr_zones, power_zones, has_power))
         if self.database is not None:
             if prior is not None:
                 # Garmin's detail read omits these list-only metrics; keep the listed values.
@@ -574,6 +602,97 @@ class GarminTools:
                 )
             self.database.put_activity_detail(detail)
         return detail.compact()
+
+    def get_activities_detail(
+        self, activity_ids: Sequence[int], detail: str = "compact", refresh: bool = False
+    ) -> dict[str, Any]:
+        if detail not in ("compact", "full"):
+            raise GarminOwlInputError("detail must be 'compact' or 'full'")
+        if not 1 <= len(activity_ids) <= MAX_BATCH_ACTIVITIES:
+            raise GarminOwlInputError(
+                f"activity_ids must contain between 1 and {MAX_BATCH_ACTIVITIES} IDs"
+            )
+        if len(set(activity_ids)) != len(activity_ids):
+            raise GarminOwlInputError("activity_ids must be unique")
+        for activity_id in activity_ids:
+            validate_activity_id(activity_id)
+        details: list[ActivityDetail] = []
+        failures: list[ActivityFailure] = []
+        stopped: GarminOwlError | None = None
+        used = 0
+        for activity_id in activity_ids:
+            if stopped is not None:
+                status = _FAILURE_STATUS.get(type(stopped), RETRIEVAL_FAILED)
+                failures.append(
+                    ActivityFailure(
+                        activity_id=activity_id,
+                        status=status,
+                        message=f"Not read: {stopped} Call again later with the remaining IDs.",
+                    )
+                )
+                continue
+            try:
+                item = ActivityDetail(**self.get_activity(activity_id, refresh))
+            except GarminOwlAuthError:
+                raise
+            except GarminOwlMissingDataError:
+                failures.append(
+                    ActivityFailure(
+                        activity_id=activity_id,
+                        status=MISSING_OR_UNSUPPORTED,
+                        message="Garmin has no activity with this ID for this account.",
+                    )
+                )
+                continue
+            except GarminOwlError as exc:
+                # A rate limit or outage would fail every remaining read too.
+                stopped = exc
+                failures.append(
+                    ActivityFailure(
+                        activity_id=activity_id,
+                        status=_FAILURE_STATUS.get(type(exc), RETRIEVAL_FAILED),
+                        message=f"{exc} Call again later with the remaining IDs.",
+                    )
+                )
+                continue
+            if detail == "compact":
+                item = item.model_copy(
+                    update={
+                        "summary": ActivitySummary(
+                            **{
+                                field: getattr(item.summary, field)
+                                for field in COMPACT_DETAIL_FIELDS
+                            }
+                        ),
+                        "laps": [],
+                        "power_zones_seconds": {},
+                        "availability": [
+                            notice
+                            for notice in item.availability
+                            if notice.field != "power_zones_seconds"
+                        ],
+                    }
+                )
+            size = len(json.dumps(item.compact(), ensure_ascii=False, separators=(",", ":")))
+            if details and used + size > DETAIL_BATCH_CHAR_BUDGET - _DETAIL_ENVELOPE_RESERVE:
+                # The detail is cached now, so asking again for it costs nothing.
+                failures.append(
+                    ActivityFailure(
+                        activity_id=activity_id,
+                        status="size_budget",
+                        message="Cached; left out for size. Request it again.",
+                    )
+                )
+                continue
+            used += size
+            details.append(item)
+        return ActivityDetailBatch(
+            requested=len(activity_ids),
+            returned=len(details),
+            detail=detail,
+            activities=details,
+            not_returned=failures,
+        ).compact()
 
     def get_body_composition(
         self, start_date: str | None = None, end_date: str | None = None

@@ -57,7 +57,7 @@
     },
     {
       "name": "get_activity",
-      "description": "Read details for one Garmin activity, including the user's own notes and effort ratings, without location tracks or raw streams."
+      "description": "Read details for one Garmin activity, including the user's own notes, effort ratings and the HR-zone floors in effect, without location tracks or raw streams."
     },
     {
       "name": "get_body_composition",
@@ -110,6 +110,10 @@
     {
       "name": "get_data_coverage",
       "description": "Find the first and last date with Garmin data per metric family, the activity count, and the user's devices."
+    },
+    {
+      "name": "get_activities_detail",
+      "description": "Read details for up to 50 activities at once: notes, effort ratings, recovery HR, zone time and the HR-zone floors in effect for each."
     }
   ],
   "tools_generated": false,

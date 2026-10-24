@@ -23,7 +23,6 @@ from .models import (
     ActivityDetail,
     ActivityLap,
     ActivitySummary,
-    AvailabilityNotice,
     BodyBatterySummary,
     BodyCompositionEntry,
     CacheInfo,
@@ -44,6 +43,7 @@ from .notices import (
     cycle_notices,
     unavailable_source_notice,
     unlabeled_status_notice,
+    zone_notice,
 )
 
 # Bump whenever stored values change meaning or format, and add a step to ``_migrate`` that
@@ -189,6 +189,11 @@ CREATE TABLE IF NOT EXISTS daily_series (
   fetched_at TEXT NOT NULL, PRIMARY KEY(date, metric)
 );
 CREATE INDEX IF NOT EXISTS idx_daily_series_source ON daily_series(source, date);
+CREATE TABLE IF NOT EXISTS activity_hr_zone_floors (
+  activity_id INTEGER NOT NULL, zone TEXT NOT NULL, low_bpm INTEGER NOT NULL,
+  PRIMARY KEY(activity_id, zone),
+  FOREIGN KEY(activity_id) REFERENCES activities(activity_id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS metadata_cache (
   key TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL
 );
@@ -644,6 +649,13 @@ class GarminDatabase:
             connection.execute(
                 "UPDATE sleep SET skin_temperature_deviation_c=0.0 "
                 "WHERE skin_temperature_deviation_c=0"
+            )
+        if version < 10:
+            # Version 10 keeps the HR-zone floors Garmin applied to each activity. Details cached
+            # earlier never stored them, so each is re-read once when next requested.
+            connection.execute(
+                "UPDATE activities SET detail_fetched_at=? WHERE detail_fetched_at IS NOT NULL",
+                (_STALE,),
             )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -1154,6 +1166,17 @@ class GarminDatabase:
                     for index, lap in enumerate(item.laps, 1)
                 ],
             )
+            connection.execute(
+                "DELETE FROM activity_hr_zone_floors WHERE activity_id=?",
+                (item.summary.activity_id,),
+            )
+            connection.executemany(
+                "INSERT INTO activity_hr_zone_floors(activity_id,zone,low_bpm) VALUES(?,?,?)",
+                [
+                    (item.summary.activity_id, zone, low)
+                    for zone, low in (item.hr_zone_floors_bpm or {}).items()
+                ],
+            )
             for table, zones in (
                 ("activity_hr_zones", item.hr_zones_seconds),
                 ("activity_power_zones", item.power_zones_seconds),
@@ -1195,6 +1218,10 @@ class GarminDatabase:
             power = connection.execute(
                 "SELECT zone,seconds FROM activity_power_zones WHERE activity_id=?", (activity_id,)
             ).fetchall()
+            floors = connection.execute(
+                "SELECT zone,low_bpm FROM activity_hr_zone_floors WHERE activity_id=?",
+                (activity_id,),
+            ).fetchall()
         zones = {str(item["zone"]): float(item["seconds"]) for item in hr}
         summary = ActivitySummary(**dict(row), hr_zones_seconds=zones or None).model_copy(
             update={
@@ -1222,15 +1249,12 @@ class GarminDatabase:
             hr_zones_total_seconds=total,
             activity_duration_seconds=summary.duration_seconds,
             hr_zone_coverage_percent=coverage,
+            hr_zone_floors_bpm={str(item["zone"]): int(item["low_bpm"]) for item in floors} or None,
             availability=[
-                AvailabilityNotice(
-                    field=field,
-                    status=str(status),
-                    message=f"Garmin did not provide activity {label} aggregates.",
-                )
-                for field, status, label in (
-                    ("hr_zones_seconds", row["hr_zones_status"], "HR-zone"),
-                    ("power_zones_seconds", row["power_zones_status"], "power-zone"),
+                zone_notice(field, str(status))
+                for field, status in (
+                    ("hr_zones_seconds", row["hr_zones_status"]),
+                    ("power_zones_seconds", row["power_zones_status"]),
                 )
                 if status not in (None, "available")
             ],
@@ -1527,6 +1551,7 @@ class GarminDatabase:
             "activity_laps",
             "activity_hr_zones",
             "activity_power_zones",
+            "activity_hr_zone_floors",
             "activities",
             "daily_metrics",
             "sleep",
