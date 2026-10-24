@@ -28,6 +28,7 @@ PACKAGE_FILES = (
     "src/garmin_owl/coverage.py",
     "src/garmin_owl/database.py",
     "src/garmin_owl/diagnostic.py",
+    "src/garmin_owl/events.py",
     "src/garmin_owl/models.py",
     "src/garmin_owl/normalize.py",
     "src/garmin_owl/notices.py",

@@ -21,6 +21,7 @@ from .client import (
 )
 from .coverage import data_coverage
 from .database import GarminDatabase, default_db_path
+from .events import events_between
 from .models import (
     ActivityComparison,
     ActivityDetail,
@@ -33,8 +34,10 @@ from .models import (
     BodyCompositionList,
     ComparisonDelta,
     DailyRecoveryPoint,
+    DailySeries,
     DailySummary,
     HrvSummary,
+    PeriodSummary,
     RecoverySummary,
     RecoveryTrend,
     SleepSummary,
@@ -44,6 +47,7 @@ from .models import (
     TrainingReadiness,
     TrainingWeek,
     TrendMetric,
+    Vo2MaxHistory,
 )
 from .normalize import (
     hours_from_minutes,
@@ -144,6 +148,16 @@ _FAILURE_MESSAGE = {
     RATE_LIMITED: "Garmin rate-limited this read; the value was not retrieved, not absent.",
     RETRIEVAL_FAILED: "This Garmin read failed; the value was not retrieved, not absent.",
 }
+
+
+def _with_events(
+    result: DailySeries | PeriodSummary | Vo2MaxHistory, start: date, end: date
+) -> dict[str, Any]:
+    """Attach the user's own annotations overlapping the range, read from the local file."""
+    events, notices = events_between(start, end)
+    result.events = events or None
+    result.availability.extend(notices)
+    return result.compact()
 
 
 def _compact_listing(item: ActivitySummary) -> ActivitySummary:
@@ -288,10 +302,12 @@ class GarminTools:
         start, end = self._past_range(
             start_date, end_date, default_days=DEFAULT_SERIES_DAYS, max_days=MAX_RANGE_DAYS
         )
-        return (
-            self._series_reader()
-            .daily_series(start, end, chosen, output=output, export_dir=self.export_dir)
-            .compact()
+        return _with_events(
+            self._series_reader().daily_series(
+                start, end, chosen, output=output, export_dir=self.export_dir
+            ),
+            start,
+            end,
         )
 
     def get_period_summary(
@@ -310,7 +326,9 @@ class GarminTools:
             default_days=DEFAULT_SUMMARY_DAYS,
             max_days=MAX_SUMMARY_DAYS if group_by == "month" else MAX_WEEKLY_SUMMARY_DAYS,
         )
-        return self._series_reader().period_summary(start, end, chosen, group_by).compact()
+        return _with_events(
+            self._series_reader().period_summary(start, end, chosen, group_by), start, end
+        )
 
     def get_vo2max_history(
         self, start_date: str | None = None, end_date: str | None = None
@@ -318,7 +336,7 @@ class GarminTools:
         start, end = self._past_range(
             start_date, end_date, default_days=DEFAULT_SUMMARY_DAYS, max_days=MAX_SUMMARY_DAYS
         )
-        return self._series_reader().vo2max_history(start, end).compact()
+        return _with_events(self._series_reader().vo2max_history(start, end), start, end)
 
     def get_data_coverage(self, refresh: bool = False) -> dict[str, Any]:
         return data_coverage(self.client, self.database, refresh=refresh)
