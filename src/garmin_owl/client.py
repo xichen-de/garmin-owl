@@ -33,6 +33,10 @@ class GarminReadAPI(Protocol):
     def get_body_battery(self, startdate: str, enddate: str | None = None) -> Any: ...
     def get_stress_data(self, cdate: str) -> dict[str, Any]: ...
     def get_activities_by_date(self, startdate: str, enddate: str | None = None) -> Any: ...
+    def get_activities(self, start: int = 0, limit: int = 20) -> Any: ...
+    def count_activities(self) -> int: ...
+    def get_devices(self) -> list[dict[str, Any]]: ...
+    def get_max_metrics_range(self, start: str, end: str) -> Any: ...
     def get_activity(self, activity_id: str) -> dict[str, Any]: ...
     # Upstream 0.3.11 annotates these as dict, but live endpoints return lists.
     def get_activity_hr_in_timezones(self, activity_id: str) -> dict[str, Any] | list[Any]: ...
@@ -273,6 +277,21 @@ class GarminDataClient:
             "activities", lambda: self.__api.get_activities_by_date(startdate, enddate)
         )
         return data[:limit] if limit is not None and isinstance(data, list) else data
+
+    def activity_page(self, offset: int, limit: int) -> Any:
+        """Read activities by position, newest first (offset 0 is the most recent)."""
+        return self._read("activity page", lambda: self.__api.get_activities(offset, limit))
+
+    def activity_count(self) -> int:
+        return self._read("activity count", self.__api.count_activities)
+
+    def devices(self) -> Any:
+        return self._read("devices", self.__api.get_devices)
+
+    def max_metrics_range(self, startdate: str, enddate: str) -> Any:
+        return self._read(
+            "max metrics range", lambda: self.__api.get_max_metrics_range(startdate, enddate)
+        )
 
     def activity(self, activity_id: int) -> tuple[Any, Any, Any]:
         activity_key = str(activity_id)

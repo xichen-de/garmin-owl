@@ -25,6 +25,7 @@ PACKAGE_FILES = (
     "src/garmin_owl/auth.py",
     "src/garmin_owl/cache_cli.py",
     "src/garmin_owl/client.py",
+    "src/garmin_owl/coverage.py",
     "src/garmin_owl/database.py",
     "src/garmin_owl/diagnostic.py",
     "src/garmin_owl/models.py",

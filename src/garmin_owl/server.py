@@ -26,6 +26,7 @@ from .models import (
     CycleSummary,
     DailySeries,
     DailySummary,
+    DataCoverage,
     HrvSummary,
     PeriodSummary,
     RecoverySummary,
@@ -736,6 +737,38 @@ def get_cycle(date: Day = None) -> Annotated[CallToolResult, CycleSummary]:
     automatically.
     """
     return _tool_result(get_tools().get_cycle(date))
+
+
+@mcp.tool(annotations=_READ_ANNOTATIONS)
+@_expose_safe_errors
+def get_data_coverage(
+    refresh: Annotated[
+        bool,
+        Field(
+            description=(
+                "When true, ask Garmin again instead of reusing the answer cached for 24 hours. "
+                "Defaults to false."
+            )
+        ),
+    ] = False,
+) -> Annotated[CallToolResult, DataCoverage]:
+    """Get the first and last date with Garmin data per metric family (daily summary/resting
+    HR, HRV, sleep, VO2 max, training readiness, activities), the activity count, and the
+    user's devices.
+
+    Use before any long-range or "since the beginning" analysis to choose start_date instead of
+    probing dates one by one; use get_daily_series or get_period_summary next, whose coverage
+    shows the gaps inside the span. Families without any data are omitted. Training readiness
+    has no Garmin range read, so its dates cover locally cached days only (method says so).
+    Devices list model, status, registration date and primary flag; never serial numbers.
+
+    Costs about a dozen Garmin requests and is cached for 24 hours.
+
+    Requires saved local Garmin authentication (garmin-owl-auth). Reads Garmin and may update
+    the local cache; never changes your Garmin account. Garmin failures are not retried
+    automatically.
+    """
+    return _tool_result(get_tools().get_data_coverage(refresh))
 
 
 @mcp.tool(annotations=_READ_ANNOTATIONS)

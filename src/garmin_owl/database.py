@@ -189,6 +189,9 @@ CREATE TABLE IF NOT EXISTS daily_series (
   fetched_at TEXT NOT NULL, PRIMARY KEY(date, metric)
 );
 CREATE INDEX IF NOT EXISTS idx_daily_series_source ON daily_series(source, date);
+CREATE TABLE IF NOT EXISTS metadata_cache (
+  key TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL
+);
 """
 
 # Columns added after the first release of a table, applied to caches created earlier.
@@ -1456,6 +1459,30 @@ class GarminDatabase:
             result.setdefault(str(row[0]), {})[str(row[1])] = float(row[2])
         return result
 
+    def get_metadata(self, key: str, *, max_age: timedelta) -> str | None:
+        """A cached account-level answer, if it is younger than ``max_age``."""
+        row = self._row("metadata_cache", "key", key)
+        if row is None:
+            return None
+        if utc_now() - datetime.fromisoformat(row["fetched_at"]) > max_age:
+            return None
+        return str(row["payload"])
+
+    def put_metadata(self, key: str, payload: str, *, now: datetime | None = None) -> None:
+        self._upsert(
+            "metadata_cache",
+            "key",
+            {"key": key, "payload": payload, "fetched_at": _timestamp(now)},
+        )
+
+    def cached_readiness_dates(self) -> tuple[str | None, str | None]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT min(date), max(date) FROM daily_metrics "
+                "WHERE training_readiness IS NOT NULL"
+            ).fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
     def _row(self, table: str, key: str, value: Any) -> sqlite3.Row | None:
         with self.connect() as connection:
             return cast(
@@ -1510,6 +1537,7 @@ class GarminDatabase:
             "body_battery",
             "stress",
             "daily_series",
+            "metadata_cache",
         )
         with self.connect() as connection:
             for table in tables:

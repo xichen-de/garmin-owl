@@ -106,6 +106,10 @@
     {
       "name": "get_period_summary",
       "description": "Summarize Garmin daily metrics per month or week (mean, SD, min, max, day count) over up to three years in one call."
+    },
+    {
+      "name": "get_data_coverage",
+      "description": "Find the first and last date with Garmin data per metric family, the activity count, and the user's devices."
     }
   ],
   "tools_generated": false,

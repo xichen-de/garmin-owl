@@ -93,6 +93,15 @@ class FakeGarmin:
             [{"activityId": i + 1, "activityName": f"Activity {i + 1}"} for i in range(limit)],
         )
 
+    def count_activities(self) -> int:
+        return self._record("count_activities", 0)
+
+    def get_devices(self) -> list[dict[str, Any]]:
+        return self._record("get_devices", [])
+
+    def get_max_metrics_range(self, start: str, end: str) -> list[dict[str, Any]]:
+        return self._record("get_max_metrics_range", [])
+
     def get_activities_by_date(
         self, startdate: str, enddate: str | None = None
     ) -> list[dict[str, Any]]:
@@ -657,6 +666,15 @@ def test_cycle_cache_hit_keeps_the_derived_fertile_window_notices(tmp_path: Path
 
 
 class ManyActivitiesGarmin(FakeGarmin):
+    def count_activities(self) -> int:
+        return self._record("count_activities", 0)
+
+    def get_devices(self) -> list[dict[str, Any]]:
+        return self._record("get_devices", [])
+
+    def get_max_metrics_range(self, start: str, end: str) -> list[dict[str, Any]]:
+        return self._record("get_max_metrics_range", [])
+
     def get_activities_by_date(
         self, startdate: str, enddate: str | None = None
     ) -> list[dict[str, Any]]:
@@ -732,6 +750,15 @@ class NotesGarmin(FakeGarmin):
 
     def _with_note(self, item: dict[str, Any]) -> dict[str, Any]:
         return {**item, "description": self.note} if self.note is not None else item
+
+    def count_activities(self) -> int:
+        return self._record("count_activities", 0)
+
+    def get_devices(self) -> list[dict[str, Any]]:
+        return self._record("get_devices", [])
+
+    def get_max_metrics_range(self, start: str, end: str) -> list[dict[str, Any]]:
+        return self._record("get_max_metrics_range", [])
 
     def get_activities_by_date(
         self, startdate: str, enddate: str | None = None
@@ -1003,6 +1030,15 @@ def test_standalone_tools_disclose_a_day_without_garmin_data(
 
 
 class SixActivitiesGarmin(FakeGarmin):
+    def count_activities(self) -> int:
+        return self._record("count_activities", 0)
+
+    def get_devices(self) -> list[dict[str, Any]]:
+        return self._record("get_devices", [])
+
+    def get_max_metrics_range(self, start: str, end: str) -> list[dict[str, Any]]:
+        return self._record("get_max_metrics_range", [])
+
     def get_activities_by_date(
         self, startdate: str, enddate: str | None = None
     ) -> list[dict[str, Any]]:

@@ -602,3 +602,37 @@ class PeriodSummary(OwlModel):
         "Descriptive statistics over Garmin-provided daily values; missing days are excluded, "
         "never counted as zero."
     )
+
+
+class CoverageFamily(OwlModel):
+    family: str
+    first_date: str | None = None
+    last_date: str | None = None
+    days_with_data: int | None = Field(
+        default=None, description="Days with data in the span, where Garmin's reads count them."
+    )
+    regular_from: str | None = Field(
+        default=None,
+        description="First day of the first 7-day stretch with data on at least 4 days. Earlier "
+        "dates are isolated records; long-range analyses usually start here.",
+    )
+    method: str = Field(description="How garmin-owl determined these dates.")
+
+
+class DeviceInfo(OwlModel):
+    product_name: str | None = None
+    status: str | None = None
+    registered_date: str | None = None
+    primary: bool | None = None
+
+
+class DataCoverage(OwlModel):
+    families: list[CoverageFamily] = Field(default_factory=list)
+    activity_count: int | None = None
+    devices: list[DeviceInfo] = Field(default_factory=list)
+    checked_at: str | None = _instant("When Garmin was last asked")
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
+    note: str = (
+        "Dates bound where Garmin has data; days inside the span can still be missing. Use "
+        "get_daily_series or get_period_summary coverage for gaps."
+    )

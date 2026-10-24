@@ -18,6 +18,7 @@ from .client import (
     GarminOwlRateLimitError,
     GarminOwlUnavailableError,
 )
+from .coverage import data_coverage
 from .database import GarminDatabase, default_db_path
 from .models import (
     ActivityComparison,
@@ -262,6 +263,9 @@ class GarminTools:
             max_days=MAX_SUMMARY_DAYS if group_by == "month" else MAX_WEEKLY_SUMMARY_DAYS,
         )
         return self._series_reader().period_summary(start, end, chosen, group_by).compact()
+
+    def get_data_coverage(self, refresh: bool = False) -> dict[str, Any]:
+        return data_coverage(self.client, self.database, refresh=refresh)
 
     def _ensure(self, resource: str, cdate: str) -> None:
         if self.sync is not None:
