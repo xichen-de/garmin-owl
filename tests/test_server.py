@@ -40,7 +40,22 @@ def test_server_registers_only_the_intended_read_tools() -> None:
         "get_data_coverage",
         "get_activities_detail",
         "get_vo2max_history",
+        "get_activity_timeseries",
+        "get_activity_segments",
+        "compare_activity_segments",
     }
+
+
+def test_sample_analysis_tools_are_scoped_to_on_demand_use() -> None:
+    async def descriptions() -> dict[str, str]:
+        async with Client(mcp) as client:
+            result = await client.list_tools()
+            return {tool.name: " ".join((tool.description or "").split()) for tool in result.tools}
+
+    found = anyio.run(descriptions)
+    for name in ("get_activity_timeseries", "get_activity_segments", "compare_activity_segments"):
+        assert "Use only when the user asks to analyse a specific activity in detail" in found[name]
+        assert "Do not use for general health, recovery or trend questions." in found[name]
 
 
 def test_exported_tool_metadata_is_complete_without_authentication(

@@ -24,6 +24,7 @@ PACKAGE_FILES = (
     "scripts/launch-chatgpt.sh",
     "src/garmin_owl/__init__.py",
     "src/garmin_owl/py.typed",
+    "src/garmin_owl/activity_series.py",
     "src/garmin_owl/auth.py",
     "src/garmin_owl/cache_cli.py",
     "src/garmin_owl/client.py",

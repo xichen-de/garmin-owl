@@ -96,6 +96,18 @@
       "description": "Compare 2-10 activities using concise normalized metrics, disclosing how many reported each one."
     },
     {
+      "name": "get_activity_timeseries",
+      "description": "On-demand only: one activity's resampled per-sample HR, pace, cadence, elevation, grade and respiration, for detailed analysis of that session. No GPS."
+    },
+    {
+      "name": "get_activity_segments",
+      "description": "On-demand only: split one activity into climbs, flats and descents with HR lag, recovery, pace, cadence and cardiac drift. No GPS."
+    },
+    {
+      "name": "compare_activity_segments",
+      "description": "On-demand only: match the same climb across 2-10 activities by distance and elevation shape (no GPS) and compare HR and pace on it."
+    },
+    {
       "name": "get_cycle",
       "description": "Read normalized cycle phase and timing without notes, symptoms, or raw daily logs."
     },

@@ -49,6 +49,7 @@ Using ChatGPT? Follow [docs/chatgpt.md](docs/chatgpt.md) instead.
 
 - **Any day:** sleep, HRV, resting HR, stress, Body Battery, training readiness, cycle phase
 - **Workouts:** activity lists, details with your own notes and effort ratings, comparisons, weekly totals
+- **One workout in depth (only when you ask about that workout):** per-sample HR, pace, cadence, elevation, and respiration charts, climb-by-climb HR response, and the same hill compared across days, all without GPS
 - **Training:** load and status, zones, running tolerance, VO2 max
 - **Long-term:** daily history or monthly summaries over up to three years, and when your data starts
 
