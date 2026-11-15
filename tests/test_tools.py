@@ -116,6 +116,14 @@ class FakeGarmin:
         self.activity_arguments.append(activity_id)
         return self._record("get_activity_hr_in_timezones", [])
 
+    def get_activity_details(
+        self, activity_id: str, maxchart: int = 2000, maxpoly: int = 4000
+    ) -> dict[str, Any]:
+        from test_activity_series import simulate
+
+        self.activity_arguments.append(activity_id)
+        return self._record("get_activity_details", simulate())
+
     def get_activity_power_in_timezones(self, activity_id: str) -> list[dict[str, Any]]:
         self.activity_arguments.append(activity_id)
         return self._record("get_activity_power_in_timezones", [])

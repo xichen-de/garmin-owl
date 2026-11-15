@@ -46,6 +46,8 @@ tools.py       GarminTools: input validation, cache-or-fetch, combining reads, a
    │                 to Garmin's limits, cached per day in daily_series, with a request budget
    ├── coverage.py   get_data_coverage: bounding each metric family with a few range reads
    ├── events.py     the user's read-only events.toml, attached to long-range answers
+   ├── activity_series.py  on-demand per-sample analysis of one activity (time series,
+   │                 segments, matching); reads only allow-listed, non-location chart columns
    ├── database.py   GarminDatabase: SQLite schema, migrations, freshness rules, typed get/put
    │
 normalize.py   raw Garmin JSON → models, defensively (every key optional, alternate key names)

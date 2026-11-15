@@ -15,7 +15,7 @@ Details behind the [README](../README.md): every tool, date limits, how answers 
 
 ## Tools
 
-Your assistant chooses among 24 read-only tools. None of them can change anything in your Garmin account.
+Your assistant chooses among 27 read-only tools. None of them can change anything in your Garmin account.
 
 **One day at a time**
 
@@ -42,6 +42,18 @@ Your assistant chooses among 24 read-only tools. None of them can change anythin
 | `get_training_load` | Acute/chronic load, ratio/status, load focus/targets, VO2 max, endurance, hill, acclimation |
 | `get_training_zones` | Today's configured HR and cycling-power zone thresholds (Garmin keeps no history; see `hr_zone_floors_bpm` on activities) |
 | `get_running_tolerance` | Running distance, impact load, tolerance, and feedback over 1–90 days |
+
+**One activity in detail (on demand only)**
+
+These are for deep dives into a specific session, such as how your heart rate responded to a climb or how the same hill compares across days. The assistant uses them only when you ask about a particular activity in that much detail, never for general health, recovery, or trend questions, and no other tool uses them or includes their output.
+
+| Tool | Answers |
+| --- | --- |
+| `get_activity_timeseries` | One row per resampled interval (10 s by default, at most 600 rows) of HR, speed and pace, cadence, smoothed elevation, grade, and respiration where recorded, with a moving/stopped flag; optional distance window; sampling quality (native interval, smart vs 1-second recording, pauses, stops, gaps) |
+| `get_activity_segments` | Climb, flat, and descent segments with elevation, grade, HR at start, peak HR and its lag, HR drop 60 s after each climb, pace, cadence, and respiration; plus cardiac drift on flat steady sections and HR per % grade |
+| `compare_activity_segments` | The same climb or distance window across 2–10 activities of one route, matched by distance and elevation shape (no GPS), with a match confidence and the reason any activity could not be matched |
+
+Only metrics an activity actually recorded are returned. An indoor session has no distance, pace, elevation, or grade, and respiration exists only for some activities and sensors. Each absent metric is explained in `availability`. Elevation smoothing, grade, segments, and match confidence are calculated by garmin-owl, and each states its formula. **No location is read, stored, or returned:** Garmin's track, coordinates, start/end points, and bounding box are dropped as soon as the response arrives. Each activity's samples cost one Garmin read (two if its summary isn't cached yet) and are cached afterwards.
 
 **Body, combined, and trends**
 
@@ -75,7 +87,7 @@ You can ask about any past date. The only limit on history is how much Garmin st
 | Up to 90 days | `get_recent_activities` (ending today), `get_running_tolerance` (ending on any date) |
 | Fixed window | `get_recovery_trend`: last 1-28 days, ending today<br>`get_training_context`: the 7 days ending on the chosen date<br>`get_training_week`: the Mon–Sun week containing the chosen date |
 
-`get_activity`, `get_activities_detail` and `compare_activities` take activity IDs, not dates; `get_training_zones` and `get_data_coverage` take none. Activity lists return at most 100 activities per request and stop early rather than overflow the client; `truncated` says when more matched, and `next_offset` fetches the next page.
+`get_activity`, `get_activities_detail`, `compare_activities` and the three on-demand activity-detail tools take activity IDs, not dates; `get_training_zones` and `get_data_coverage` take none. Activity lists return at most 100 activities per request and stop early rather than overflow the client; `truncated` says when more matched, and `next_offset` fetches the next page.
 
 You don't need to know these limits: describe the period in plain language and Claude picks the dates. For longer periods, such as several years of activities, Claude can split the question into several requests. A request that is too long returns an error that states the limit.
 
@@ -133,7 +145,7 @@ uv run garmin-owl-sync --start 2025-01-01 --end 2025-12-31   # any past window
 - A single run covers at most **366 days**. `--days` counts back from today. `--start` can be any past date, and `--end` defaults to today.
 - To load more than a year, run one window per year. Days already cached are skipped.
 - `--refresh-today` or `--refresh-date YYYY-MM-DD` re-fetches a day even if it's cached.
-- Sync pre-loads daily summaries, sleep, HRV, training readiness, and activity lists. Body Battery, stress, activity details, training load, body composition, and cycle data are fetched the first time you ask, then cached.
+- Sync pre-loads daily summaries, sleep, HRV, training readiness, and activity lists. Body Battery, stress, activity details, per-activity samples (without location), training load, body composition, and cycle data are fetched the first time you ask, then cached.
 
 Inspect or clear the cache (clearing never touches your Garmin sign-in):
 
@@ -244,6 +256,7 @@ The cache upgrades itself when needed. Your saved sign-in carries over.
 - Your events file is read-only for `garmin-owl`, and exports are written only into its own `exports` folder with owner-only permissions.
 - Device information excludes serial numbers, unit IDs and device nicknames.
 - Answers exclude credentials, account identifiers, raw GPS coordinates, and private cycle logs.
+- The per-activity sample tools never keep location. Garmin sends coordinates, a start and end point, and a bounding box even when no track is requested; `garmin-owl` reads only an allow-list of non-location metrics, so none of these reach the cache or an answer.
 - Health summaries are informational, **not medical advice**.
 
 What you ask Claude, and the answers it gets from `garmin-owl`, are handled under your MCP client's privacy and data-retention settings, so review those before sharing health information with any model.

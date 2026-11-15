@@ -22,6 +22,8 @@ from .models import (
     ActivityDetail,
     ActivityDetailBatch,
     ActivityList,
+    ActivitySegments,
+    ActivityTimeseries,
     BodyBatterySummary,
     BodyCompositionList,
     CycleSummary,
@@ -33,6 +35,7 @@ from .models import (
     RecoverySummary,
     RecoveryTrend,
     RunningTolerance,
+    SegmentComparison,
     SleepSummary,
     StressSummary,
     TrainingContext,
@@ -46,7 +49,7 @@ from .tools import GarminOwlInputError, GarminTools
 
 mcp = MCPServer(
     "garmin-owl",
-    version="0.3.1",
+    version="0.4.0",
     instructions=(
         "Read-only access to the local user's Garmin Connect data. "
         "Never claim this is medical advice. No mutation tools exist. "
@@ -848,6 +851,193 @@ def compare_activities(
     automatically.
     """
     return _tool_result(get_tools().compare_activities(activity_ids))
+
+
+SampleActivityId = Annotated[
+    int,
+    Field(
+        gt=0,
+        description="Positive Garmin activity ID from get_activities or get_recent_activities.",
+    ),
+]
+MinClimb = Annotated[
+    float,
+    Field(
+        ge=1,
+        le=200,
+        description=(
+            "Smallest elevation change in metres that counts as a climb or descent, 1-200; "
+            "defaults to 5. Smaller undulations are part of flat segments."
+        ),
+    ),
+]
+TimeseriesMetric = Literal[
+    "elapsed_s",
+    "moving",
+    "distance_m",
+    "hr_bpm",
+    "speed_mps",
+    "pace_s_per_km",
+    "cadence_spm",
+    "cadence_rpm",
+    "elevation_m",
+    "grade_pct",
+    "respiration_brpm",
+]
+
+
+@mcp.tool(annotations=_READ_ANNOTATIONS)
+@_expose_safe_errors
+def get_activity_timeseries(
+    activity_id: SampleActivityId,
+    resample_seconds: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=600,
+            description=(
+                "Average samples into intervals of this many seconds, 1-600; defaults to 10. "
+                "Coarsened automatically (and disclosed) to stay within 600 rows."
+            ),
+        ),
+    ] = 10,
+    metrics: Annotated[
+        list[TimeseriesMetric] | None,
+        Field(
+            min_length=1,
+            description=(
+                "Columns to return; omit for every metric this activity recorded. elapsed_s is "
+                "always included. A requested metric the activity did not record is omitted "
+                "and explained in availability."
+            ),
+        ),
+    ] = None,
+    start_distance_m: Annotated[
+        float | None,
+        Field(ge=0, description="Only samples at or after this distance from the start."),
+    ] = None,
+    end_distance_m: Annotated[
+        float | None,
+        Field(ge=0, description="Only samples at or before this distance from the start."),
+    ] = None,
+) -> Annotated[CallToolResult, ActivityTimeseries]:
+    """Get one activity's per-sample heart rate, pace/speed, cadence, elevation, grade and
+    respiration over time, like the charts on Garmin Connect's activity page.
+
+    Use only when the user asks to analyse a specific activity in detail (e.g.
+    heart-rate response to climbs, pace or cadence within a session). Do not use for general
+    health, recovery or trend questions.
+
+    Returns columns plus one row per resampled interval. Only metrics the activity recorded
+    appear: an indoor session has no distance, pace, elevation or grade, and respiration exists
+    only for some activities; each absent metric is explained in availability, never filled
+    with zeros. moving=false marks stopped samples. elevation_m is smoothed and grade_pct is
+    computed over a distance window by garmin-owl (see availability). sampling reports the
+    native interval, smart vs 1-second recording, pauses, stops and gaps. Optional distance
+    window to zoom into part of the activity. No GPS position or track is ever read or
+    returned.
+
+    Requires saved local Garmin authentication (garmin-owl-auth). Reads Garmin and may update
+    the local cache; never changes your Garmin account. Garmin failures are not retried
+    automatically.
+    """
+    return _tool_result(
+        get_tools().get_activity_timeseries(
+            activity_id, resample_seconds, metrics, start_distance_m, end_distance_m
+        ),
+        compact=True,
+    )
+
+
+@mcp.tool(annotations=_READ_ANNOTATIONS)
+@_expose_safe_errors
+def get_activity_segments(
+    activity_id: SampleActivityId, min_climb_m: MinClimb = 5
+) -> Annotated[CallToolResult, ActivitySegments]:
+    """Split one activity into climb, flat and descent segments and report how heart rate,
+    pace, cadence and respiration responded in each.
+
+    Use only when the user asks to analyse a specific activity in detail (e.g.
+    heart-rate response to climbs, pace or cadence within a session). Do not use for general
+    health, recovery or trend questions.
+
+    Per segment: distances, elapsed times, elevation gain/loss, average grade, average HR, HR
+    at the start, peak HR and the lag from segment start to that peak (HR trails effort by tens
+    of seconds, so peaks are searched up to 90 s past a climb's end), the HR drop in the 60 s
+    after a climb, speed/pace, cadence, and respiration when recorded. Also returns cardiac
+    drift (aerobic decoupling) on flat, steadily paced sections, or why it was skipped, and
+    the HR-vs-grade slope with its lag and point count. Activities without distance or
+    elevation (indoor) return no segments, with the reason in availability. No GPS is used.
+
+    Requires saved local Garmin authentication (garmin-owl-auth). Reads Garmin and may update
+    the local cache; never changes your Garmin account. Garmin failures are not retried
+    automatically.
+    """
+    return _tool_result(get_tools().get_activity_segments(activity_id, min_climb_m))
+
+
+@mcp.tool(annotations=_READ_ANNOTATIONS)
+@_expose_safe_errors
+def compare_activity_segments(
+    activity_ids: Annotated[
+        list[Annotated[int, Field(gt=0)]],
+        Field(
+            min_length=2,
+            max_length=10,
+            description="2-10 unique activity IDs of the same route, e.g. a regular loop.",
+        ),
+    ],
+    segment: Annotated[
+        Literal["largest_climb", "distance_window"],
+        Field(
+            description=(
+                "largest_climb (default): the reference activity's biggest climb. "
+                "distance_window: start_distance_m to end_distance_m of the reference activity."
+            )
+        ),
+    ] = "largest_climb",
+    reference_activity_id: Annotated[
+        int | None,
+        Field(
+            gt=0, description="Which of activity_ids defines the segment; defaults to the first."
+        ),
+    ] = None,
+    start_distance_m: Annotated[
+        float | None,
+        Field(ge=0, description="distance_window only: window start in the reference activity."),
+    ] = None,
+    end_distance_m: Annotated[
+        float | None,
+        Field(ge=0, description="distance_window only: window end, at least 50 m after the start."),
+    ] = None,
+    min_climb_m: MinClimb = 5,
+) -> Annotated[CallToolResult, SegmentComparison]:
+    """Compare the same climb or stretch of route across 2-10 activities without GPS.
+
+    Use only when the user asks to analyse a specific activity in detail (e.g.
+    heart-rate response to climbs, pace or cadence within a session). Do not use for general
+    health, recovery or trend questions.
+
+    The segment is found in each activity by distance from the start plus the shape of the
+    smoothed elevation profile (shifted and stretched slightly to absorb GPS distance drift),
+    never by position. Each matched activity gets the same per-segment metrics as
+    get_activity_segments plus a match confidence; activities that cannot be matched (indoor,
+    different route, low confidence, read failure) are listed in unmatched with the reason.
+
+    Requires saved local Garmin authentication (garmin-owl-auth). Reads Garmin and may update
+    the local cache; never changes your Garmin account. Garmin failures are not retried
+    automatically.
+    """
+    return _tool_result(
+        get_tools().compare_activity_segments(
+            activity_ids,
+            segment,
+            reference_activity_id,
+            start_distance_m,
+            end_distance_m,
+            min_climb_m,
+        )
+    )
 
 
 @mcp.tool(annotations=_READ_ANNOTATIONS)

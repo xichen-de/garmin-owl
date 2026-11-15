@@ -38,6 +38,9 @@ class GarminReadAPI(Protocol):
     def get_devices(self) -> list[dict[str, Any]]: ...
     def get_max_metrics_range(self, start: str, end: str) -> Any: ...
     def get_activity(self, activity_id: str) -> dict[str, Any]: ...
+    def get_activity_details(
+        self, activity_id: str, maxchart: int = 2000, maxpoly: int = 4000
+    ) -> dict[str, Any]: ...
     # Upstream 0.3.11 annotates these as dict, but live endpoints return lists.
     def get_activity_hr_in_timezones(self, activity_id: str) -> dict[str, Any] | list[Any]: ...
     def get_activity_power_in_timezones(self, activity_id: str) -> dict[str, Any] | list[Any]: ...
@@ -92,6 +95,11 @@ class GarminOwlMissingDataError(GarminOwlError):
 # Zone reads that fail this way mean the activity or device has no such breakdown.
 _ZONES_ABSENT = (GarminOwlMissingDataError, GarminOwlRequestError, GarminOwlResponseError)
 
+
+# Per-sample chart rows requested from Garmin's activity details read. Verified live: Garmin
+# returns every stored sample up to this size (totalMetricsCount == metricsCount), which covers
+# about 2.7 hours of 1-second recording or 12 hours of smart recording.
+ACTIVITY_CHART_MAX_SAMPLES = 10_000
 
 # Garmin's daily Body Battery report answers HTTP 400 for ranges longer than 31 days
 # (verified live; 31 succeeds, 32 fails).
@@ -300,6 +308,22 @@ class GarminDataClient:
     def activity_summary(self, activity_id: int) -> Any:
         activity_key = str(activity_id)
         return self._read("activity detail", lambda: self.__api.get_activity(activity_key))
+
+    def activity_chart(self, activity_id: int) -> Any:
+        """Read one activity's per-sample chart data, without the GPS polyline.
+
+        ``maxpoly=0`` asks Garmin for no track. Garmin still sends latitude/longitude columns
+        and a ``geoPolylineDTO`` with start/end points and a bounding box, so callers must pass
+        the response straight to ``activity_series.parse_activity_chart``, which reads only an
+        allow-list of non-location metrics.
+        """
+        activity_key = str(activity_id)
+        return self._read(
+            "activity chart",
+            lambda: self.__api.get_activity_details(
+                activity_key, maxchart=ACTIVITY_CHART_MAX_SAMPLES, maxpoly=0
+            ),
+        )
 
     def activity_zones(self, activity_id: int, *, power: bool = True) -> tuple[Any, Any]:
         """Read zone aggregates; ``power=False`` skips the power read for activities without

@@ -720,3 +720,202 @@ class Vo2MaxHistory(OwlModel):
         "Garmin's own estimates, recorded only on days Garmin updated them; days between "
         "points carry no new estimate, not a missing measurement."
     )
+
+
+# --- On-demand per-activity sample analysis -------------------------------------------------
+# These models carry no location: no latitude, longitude, polyline, start/end point or bounding
+# box is ever read from Garmin's chart response (see activity_series.parse_activity_chart).
+
+SampleValue = bool | int | float | None
+
+
+class SampleStretch(OwlModel):
+    kind: str = Field(
+        description="timer_paused (the activity timer was stopped), stopped (timer running, "
+        "not moving: traffic lights, standing) or recording_gap (no samples for an unusually "
+        "long time)."
+    )
+    start_elapsed_s: float
+    duration_s: float
+    start_distance_m: float | None = None
+
+
+class SamplingQuality(OwlModel):
+    native_samples: int = Field(description="Samples Garmin returned for this activity.")
+    garmin_total_samples: int | None = Field(
+        default=None,
+        description="Samples Garmin says it stores; larger than native_samples only when "
+        "Garmin itself thinned the series.",
+    )
+    median_interval_s: float | None = None
+    max_interval_s: float | None = None
+    recording: str = Field(
+        description="every_second (1-second recording) or smart_recording (the device "
+        "stores a sample only when something changes, typically every few seconds)."
+    )
+    recorded_metrics: list[str] = Field(default_factory=list)
+    not_recorded_metrics: list[str] = Field(default_factory=list)
+    stretches: list[SampleStretch] = Field(default_factory=list)
+    stretches_total: int | None = Field(
+        default=None, description="Present when more stretches exist than are listed."
+    )
+    grade_clamped_samples: int | None = Field(
+        default=None,
+        description="Samples whose grade exceeded the plausible limit and was clamped to it.",
+    )
+
+
+class ActivityTimeseries(OwlModel):
+    activity_id: int
+    start_time: str | None = Field(default=None, description=f"Activity start: {TIME_CONVENTION}")
+    activity_type: str | None = None
+    requested_resample_seconds: int
+    resample_seconds: int = Field(
+        description="Interval actually used; coarser than requested when the row cap or the "
+        "response size required it (see availability)."
+    )
+    start_distance_m: float | None = None
+    end_distance_m: float | None = None
+    row_count: int
+    columns: list[str] = Field(
+        description="Names of the values in each row, in order. Only metrics this activity "
+        "recorded appear. elapsed_s is the mean elapsed time of the samples averaged into the "
+        "row; other values are their means."
+    )
+    rows: list[list[SampleValue]]
+    sampling: SamplingQuality
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
+
+
+class ActivitySegment(OwlModel):
+    kind: str = Field(description="climb, flat or descent.")
+    start_distance_m: float | None = None
+    end_distance_m: float | None = None
+    length_m: float | None = None
+    start_elapsed_s: float
+    end_elapsed_s: float
+    duration_s: float
+    moving_seconds: float | None = None
+    elevation_gain_m: float | None = None
+    elevation_loss_m: float | None = None
+    average_grade_pct: float | None = None
+    average_hr_bpm: float | None = None
+    hr_at_start_bpm: float | None = None
+    peak_hr_bpm: float | None = Field(
+        default=None,
+        description="Highest HR from the segment start until 90 s after its end for climbs "
+        "(HR keeps rising after the effort), or within the segment otherwise.",
+    )
+    hr_peak_lag_s: float | None = Field(
+        default=None, description="Seconds from the segment start to peak_hr_bpm."
+    )
+    hr_peak_after_end_s: float | None = Field(
+        default=None, description="Present when the HR peak came after the segment ended."
+    )
+    hr_drop_60s_after_end_bpm: float | None = Field(
+        default=None,
+        description="Climbs only: HR at the end of the climb minus HR 60 s later; positive "
+        "means HR fell.",
+    )
+    average_speed_mps: float | None = Field(
+        default=None, description="length_m divided by moving_seconds."
+    )
+    pace_s_per_km: float | None = None
+    average_cadence_spm: float | None = None
+    average_cadence_rpm: float | None = None
+    average_respiration_brpm: float | None = None
+    peak_respiration_brpm: float | None = None
+
+
+class CardiacDrift(OwlModel):
+    status: str = Field(description="computed or skipped.")
+    reason: str | None = None
+    qualifying_seconds: float | None = None
+    first_half_average_hr_bpm: float | None = None
+    second_half_average_hr_bpm: float | None = None
+    first_half_average_speed_mps: float | None = None
+    second_half_average_speed_mps: float | None = None
+    first_half_hr_per_speed: float | None = None
+    second_half_hr_per_speed: float | None = None
+    decoupling_percent: float | None = Field(
+        default=None,
+        description="(second-half HR/speed ÷ first-half HR/speed - 1) x 100; positive means HR "
+        "rose relative to speed (cardiac drift).",
+    )
+
+
+class HrGradeRelation(OwlModel):
+    status: str = Field(description="computed or skipped.")
+    reason: str | None = None
+    bpm_per_grade_pct: float | None = None
+    hr_at_zero_grade_bpm: float | None = None
+    correlation: float | None = None
+    hr_lag_s: int | None = Field(
+        default=None,
+        description="HR is paired with the grade this many seconds earlier: the lag with the "
+        "strongest correlation between 0 and 90 s.",
+    )
+    sample_count: int | None = Field(
+        default=None,
+        description="Grid samples used (about moving time / grid_seconds); consecutive samples "
+        "are not independent observations.",
+    )
+    grid_seconds: int | None = None
+    note: str | None = None
+
+
+class ActivitySegments(OwlModel):
+    activity_id: int
+    start_time: str | None = Field(default=None, description=f"Activity start: {TIME_CONVENTION}")
+    activity_type: str | None = None
+    segmenter: str = Field(
+        description="distance_elevation: climb/flat/descent from the smoothed elevation "
+        "profile over distance."
+    )
+    min_climb_m: float
+    segment_count: int
+    segments: list[ActivitySegment] = Field(default_factory=list)
+    segments_total: int | None = Field(
+        default=None, description="Present when more segments exist than are listed."
+    )
+    cardiac_drift: CardiacDrift | None = None
+    hr_vs_grade: HrGradeRelation | None = None
+    sampling: SamplingQuality
+    availability: list[AvailabilityNotice] = Field(default_factory=list)
+
+
+class SegmentMatch(OwlModel):
+    activity_id: int
+    start_time: str | None = Field(default=None, description=f"Activity start: {TIME_CONVENTION}")
+    reference: bool = False
+    match_method: str = Field(
+        description="reference, elevation_shape (window shifted and stretched to best fit the "
+        "reference elevation profile) or distance_only (reference window too flat to match "
+        "by shape; same distances used)."
+    )
+    match_confidence: float | None = Field(
+        default=None,
+        description="0-1: max(0, profile correlation) x elevation-range ratio. Absent for "
+        "distance_only matches.",
+    )
+    profile_correlation: float | None = None
+    elevation_range_ratio: float | None = None
+    distance_offset_m: float | None = None
+    length_scale: float | None = None
+    segment: ActivitySegment
+
+
+class UnmatchedActivity(OwlModel):
+    activity_id: int
+    status: str
+    reason: str
+
+
+class SegmentComparison(OwlModel):
+    reference_activity_id: int
+    segment: str = Field(description="largest_climb or distance_window.")
+    reference_start_distance_m: float | None = None
+    reference_end_distance_m: float | None = None
+    matched: list[SegmentMatch] = Field(default_factory=list)
+    unmatched: list[UnmatchedActivity] = Field(default_factory=list)
+    availability: list[AvailabilityNotice] = Field(default_factory=list)

@@ -18,6 +18,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Concatenate, cast
 
+from .activity_series import CHANNELS, ActivitySamples, ChartSeries
 from .models import (
     SKIN_TEMPERATURE_BASIS,
     ActivityDetail,
@@ -196,6 +197,15 @@ CREATE TABLE IF NOT EXISTS activity_hr_zone_floors (
 );
 CREATE TABLE IF NOT EXISTS metadata_cache (
   key TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS activity_sample_sets (
+  activity_id INTEGER PRIMARY KEY, start_time TEXT, activity_type TEXT, date TEXT,
+  cadence_unit TEXT, garmin_total_samples INTEGER, fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS activity_samples (
+  activity_id INTEGER NOT NULL, sample_index INTEGER NOT NULL, elapsed_s REAL NOT NULL,
+  timer_s REAL, moving_s REAL, distance_m REAL, hr_bpm REAL, speed_mps REAL, cadence REAL,
+  elevation_m REAL, respiration_brpm REAL, PRIMARY KEY(activity_id, sample_index)
 );
 """
 
@@ -1500,6 +1510,81 @@ class GarminDatabase:
             {"key": key, "payload": payload, "fetched_at": _timestamp(now)},
         )
 
+    def put_activity_samples(self, item: ActivitySamples, *, now: datetime | None = None) -> None:
+        """Store one activity's location-free samples, replacing any earlier copy."""
+        series = item.series
+        start = item.start_time
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM activity_samples WHERE activity_id=?", (item.activity_id,)
+            )
+            self._upsert(
+                "activity_sample_sets",
+                "activity_id",
+                {
+                    "activity_id": item.activity_id,
+                    "start_time": start,
+                    "activity_type": item.activity_type,
+                    "date": start[:10] if start and len(start) >= 10 else None,
+                    "cadence_unit": series.cadence_unit,
+                    "garmin_total_samples": series.garmin_total_samples,
+                    "fetched_at": _timestamp(now),
+                },
+                connection,
+            )
+            connection.executemany(
+                "INSERT INTO activity_samples(activity_id,sample_index,elapsed_s,timer_s,moving_s,"
+                f"{','.join(CHANNELS)}) VALUES(?,?,?,?,?,{','.join('?' for _ in CHANNELS)})",
+                [
+                    (
+                        item.activity_id,
+                        index,
+                        series.elapsed_s[index],
+                        series.timer_s[index],
+                        series.moving_s[index],
+                        *(series.channels[channel][index] for channel in CHANNELS),
+                    )
+                    for index in range(series.sample_count())
+                ],
+            )
+
+    @_discard_unreadable("activity_sample_sets", "activity_id")
+    def get_activity_samples(
+        self, activity_id: int, *, now: datetime | None = None
+    ) -> ActivitySamples | None:
+        """Cached samples, or None when absent or captured before the activity's day settled."""
+        with self.connect() as connection:
+            meta = connection.execute(
+                "SELECT * FROM activity_sample_sets WHERE activity_id=?", (activity_id,)
+            ).fetchone()
+            if meta is None:
+                return None
+            fetched = datetime.fromisoformat(meta["fetched_at"])
+            current = now or datetime.now().astimezone()
+            day = date.fromisoformat(meta["date"]) if meta["date"] else fetched.date()
+            if not self.is_current(day, fetched, current):
+                return None
+            rows = connection.execute(
+                "SELECT * FROM activity_samples WHERE activity_id=? ORDER BY sample_index",
+                (activity_id,),
+            ).fetchall()
+        if not rows:
+            raise ValueError("sample set without samples")
+        return ActivitySamples(
+            activity_id=activity_id,
+            start_time=meta["start_time"],
+            activity_type=meta["activity_type"],
+            series=ChartSeries(
+                elapsed_s=[float(row["elapsed_s"]) for row in rows],
+                timer_s=[row["timer_s"] for row in rows],
+                moving_s=[row["moving_s"] for row in rows],
+                channels={channel: [row[channel] for row in rows] for channel in CHANNELS},
+                cadence_unit=meta["cadence_unit"],
+                garmin_total_samples=meta["garmin_total_samples"],
+            ),
+        )
+
     def cached_readiness_dates(self) -> tuple[str | None, str | None]:
         with self.connect() as connection:
             row = connection.execute(
@@ -1530,6 +1615,8 @@ class GarminDatabase:
             "body_battery",
             "stress",
             "daily_series",
+            "activity_sample_sets",
+            "activity_samples",
         )
         with self.connect() as connection:
             counts = {
@@ -1564,6 +1651,8 @@ class GarminDatabase:
             "stress",
             "daily_series",
             "metadata_cache",
+            "activity_samples",
+            "activity_sample_sets",
         )
         with self.connect() as connection:
             for table in tables:

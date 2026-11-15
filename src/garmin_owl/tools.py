@@ -11,6 +11,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any
 
+from . import activity_series as samples
 from .client import (
     GarminDataClient,
     GarminOwlAuthError,
@@ -28,7 +29,10 @@ from .models import (
     ActivityDetailBatch,
     ActivityFailure,
     ActivityList,
+    ActivitySegment,
+    ActivitySegments,
     ActivitySummary,
+    ActivityTimeseries,
     AvailabilityNotice,
     BodyBatterySummary,
     BodyCompositionList,
@@ -40,6 +44,8 @@ from .models import (
     PeriodSummary,
     RecoverySummary,
     RecoveryTrend,
+    SegmentComparison,
+    SegmentMatch,
     SleepSummary,
     StressSummary,
     TrainingContext,
@@ -47,10 +53,12 @@ from .models import (
     TrainingReadiness,
     TrainingWeek,
     TrendMetric,
+    UnmatchedActivity,
     Vo2MaxHistory,
 )
 from .normalize import (
     hours_from_minutes,
+    local_iso,
     normalize_activities,
     normalize_activity_detail,
     normalize_body_battery,
@@ -74,6 +82,7 @@ from .notices import (
     NOT_RECORDED,
     RATE_LIMITED,
     RETRIEVAL_FAILED,
+    derived_notice,
     partial_coverage_notice,
     zone_notice,
 )
@@ -137,6 +146,11 @@ DEFAULT_RANGE_DAYS = 30
 # Window used when get_activities is called without any date, so the cached and uncached paths
 # answer the same question instead of silently differing.
 DEFAULT_ACTIVITY_DAYS = 14
+# On-demand per-activity sample analysis.
+MAX_RESAMPLE_SECONDS = 600
+MIN_CLIMB_RANGE_M = (1.0, 200.0)
+MAX_COMPARED_ACTIVITIES = 10
+SEGMENT_SELECTORS = ("largest_climb", "distance_window")
 
 _FAILURE_STATUS: dict[type[GarminOwlError], str] = {
     GarminOwlMissingDataError: MISSING_OR_UNSUPPORTED,
@@ -1223,6 +1237,344 @@ class GarminTools:
                 )
             )
         return ActivityComparison(activities=details, deltas=deltas).compact()
+
+    # --- On-demand per-activity sample analysis ---------------------------------------------
+    # Deliberately separate from every holistic or trend tool: nothing else calls these, and
+    # their output is never folded into another tool's answer.
+
+    def _activity_samples(self, activity_id: int) -> samples.ActivitySamples:
+        """Location-free samples from the cache, or one chart read (plus identity) from Garmin."""
+        validate_activity_id(activity_id)
+        if self.database is not None:
+            cached = self.database.get_activity_samples(activity_id)
+            if cached is not None:
+                return cached
+        # Location columns and the geo DTO are dropped here, before anything is kept.
+        series = samples.parse_activity_chart(self.client.activity_chart(activity_id))
+        if series is None:
+            raise GarminOwlMissingDataError(
+                "Garmin has no per-sample data for this activity (manual entries have none)."
+            )
+        start_time, activity_type = self._activity_identity(activity_id, series)
+        item = samples.ActivitySamples(activity_id, start_time, activity_type, series)
+        if self.database is not None:
+            self.database.put_activity_samples(item)
+        return item
+
+    def _activity_identity(
+        self, activity_id: int, series: samples.ChartSeries
+    ) -> tuple[str | None, str | None]:
+        """Start time with Garmin's recorded UTC offset, and the activity type.
+
+        The chart read carries only GMT timestamps, so the offset comes from the activity
+        summary: the cached row when there is one, otherwise one summary read.
+        """
+        summary: ActivitySummary | None = None
+        if self.database is not None:
+            cached = self.database.get_activity(activity_id)
+            summary = cached.summary if cached is not None else None
+        if summary is None or summary.start_time is None:
+            try:
+                summary = normalize_activity_detail(
+                    self.client.activity_summary(activity_id)
+                ).summary
+            except GarminOwlMissingDataError:
+                summary = None
+        if summary is not None and summary.start_time is not None:
+            return summary.start_time, summary.activity_type
+        fallback = local_iso(series.start_gmt_ms) if series.start_gmt_ms is not None else None
+        return fallback, summary.activity_type if summary is not None else None
+
+    def get_activity_timeseries(
+        self,
+        activity_id: int,
+        resample_seconds: int = 10,
+        metrics: Sequence[str] | None = None,
+        start_distance_m: float | None = None,
+        end_distance_m: float | None = None,
+    ) -> dict[str, Any]:
+        validate_activity_id(activity_id)
+        if isinstance(resample_seconds, bool) or not 1 <= resample_seconds <= MAX_RESAMPLE_SECONDS:
+            raise GarminOwlInputError(
+                f"resample_seconds must be between 1 and {MAX_RESAMPLE_SECONDS}"
+            )
+        if metrics is not None:
+            unknown = sorted(set(metrics) - set(samples.TIMESERIES_COLUMNS))
+            if unknown or not metrics:
+                raise GarminOwlInputError(
+                    "metrics must be a non-empty list of: " + ", ".join(samples.TIMESERIES_COLUMNS)
+                )
+        for name, value in (
+            ("start_distance_m", start_distance_m),
+            ("end_distance_m", end_distance_m),
+        ):
+            if value is not None and value < 0:
+                raise GarminOwlInputError(f"{name} must not be negative")
+        if (
+            start_distance_m is not None
+            and end_distance_m is not None
+            and start_distance_m >= end_distance_m
+        ):
+            raise GarminOwlInputError("start_distance_m must be less than end_distance_m")
+        item = self._activity_samples(activity_id)
+        analysis = samples.analyse(item.series)
+        windowed = start_distance_m is not None or end_distance_m is not None
+        if windowed and not analysis.has_distance:
+            raise GarminOwlInputError(
+                "This activity recorded no distance, so a distance window cannot be applied; "
+                "omit start_distance_m and end_distance_m."
+            )
+        indices = samples.window_indices(analysis, start_distance_m, end_distance_m)
+        if not indices:
+            distance = [d for d in analysis.channel("distance_m") if d is not None]
+            raise GarminOwlInputError(
+                f"No samples in that distance window; this activity covers 0-{max(distance):.0f} m."
+            )
+        available = samples.available_columns(analysis)
+        columns = (
+            available
+            if metrics is None
+            else [c for c in available if c == "elapsed_s" or c in metrics]
+        )
+        resampled = samples.resample(analysis, indices, resample_seconds, columns)
+        availability = samples.availability_notices(analysis)
+        availability.extend(resampled.notices)
+        availability.extend(samples.derived_notices(columns))
+        return ActivityTimeseries(
+            activity_id=activity_id,
+            start_time=item.start_time,
+            activity_type=item.activity_type,
+            requested_resample_seconds=resample_seconds,
+            resample_seconds=resampled.interval,
+            start_distance_m=start_distance_m,
+            end_distance_m=end_distance_m,
+            row_count=len(resampled.rows),
+            columns=resampled.columns,
+            rows=resampled.rows,
+            sampling=samples.sampling_quality(analysis),
+            availability=availability,
+        ).compact()
+
+    @staticmethod
+    def _validate_min_climb(min_climb_m: float) -> float:
+        low, high = MIN_CLIMB_RANGE_M
+        if isinstance(min_climb_m, bool) or not low <= min_climb_m <= high:
+            raise GarminOwlInputError(f"min_climb_m must be between {low:g} and {high:g}")
+        return float(min_climb_m)
+
+    def get_activity_segments(self, activity_id: int, min_climb_m: float = 5) -> dict[str, Any]:
+        validate_activity_id(activity_id)
+        threshold = self._validate_min_climb(min_climb_m)
+        item = self._activity_samples(activity_id)
+        analysis = samples.analyse(item.series)
+        segmenter = samples.DistanceSegmenter(threshold)
+        availability = samples.availability_notices(analysis)
+        segments: list[ActivitySegment] = []
+        reason = segmenter.unavailable_reason(analysis)
+        if reason is not None:
+            availability.append(
+                AvailabilityNotice(
+                    field="segments",
+                    status=MISSING_OR_UNSUPPORTED,
+                    message="Climb/flat/descent segmentation needs distance and elevation; "
+                    f"{reason}.",
+                )
+            )
+        else:
+            segments = [
+                samples.segment_metrics(analysis, span) for span in segmenter.split(analysis)
+            ]
+            availability.append(
+                derived_notice(
+                    "segments",
+                    f"zig-zag over the smoothed elevation profile; a climb or descent changes "
+                    f"elevation by >= min_climb_m and averages >= {samples.MIN_CLIMB_GRADE_PCT:g} "
+                    "% grade, everything else is flat.",
+                )
+            )
+        listed = segments[: samples.MAX_LISTED_SEGMENTS]
+        return ActivitySegments(
+            activity_id=activity_id,
+            start_time=item.start_time,
+            activity_type=item.activity_type,
+            segmenter=segmenter.name,
+            min_climb_m=threshold,
+            segment_count=len(listed),
+            segments=listed,
+            segments_total=len(segments) if len(segments) > len(listed) else None,
+            cardiac_drift=samples.cardiac_drift(analysis),
+            hr_vs_grade=samples.hr_vs_grade(analysis),
+            sampling=samples.sampling_quality(analysis),
+            availability=availability,
+        ).compact()
+
+    def compare_activity_segments(
+        self,
+        activity_ids: Sequence[int],
+        segment: str = "largest_climb",
+        reference_activity_id: int | None = None,
+        start_distance_m: float | None = None,
+        end_distance_m: float | None = None,
+        min_climb_m: float = 5,
+    ) -> dict[str, Any]:
+        if not 2 <= len(activity_ids) <= MAX_COMPARED_ACTIVITIES:
+            raise GarminOwlInputError(
+                f"activity_ids must contain between 2 and {MAX_COMPARED_ACTIVITIES} IDs"
+            )
+        if len(set(activity_ids)) != len(activity_ids):
+            raise GarminOwlInputError("activity_ids must be unique")
+        for activity_id in activity_ids:
+            validate_activity_id(activity_id)
+        if segment not in SEGMENT_SELECTORS:
+            raise GarminOwlInputError("segment must be 'largest_climb' or 'distance_window'")
+        reference_id = activity_ids[0] if reference_activity_id is None else reference_activity_id
+        if reference_id not in activity_ids:
+            raise GarminOwlInputError("reference_activity_id must be one of activity_ids")
+        threshold = self._validate_min_climb(min_climb_m)
+        if segment == "distance_window":
+            if start_distance_m is None or end_distance_m is None:
+                raise GarminOwlInputError(
+                    "segment 'distance_window' needs start_distance_m and end_distance_m"
+                )
+            if (
+                start_distance_m < 0
+                or end_distance_m - start_distance_m < samples.MIN_MATCH_WINDOW_M
+            ):
+                raise GarminOwlInputError(
+                    "the distance window must start at 0 m or later and span at least "
+                    f"{samples.MIN_MATCH_WINDOW_M:g} m"
+                )
+
+        reference_item = self._activity_samples(reference_id)
+        reference = samples.analyse(reference_item.series)
+        result = SegmentComparison(reference_activity_id=reference_id, segment=segment)
+        reason = samples.DistanceSegmenter(threshold).unavailable_reason(reference)
+        if reason is not None:
+            raise GarminOwlInputError(
+                f"The reference activity cannot be matched without GPS: {reason}."
+            )
+        assert reference.profile is not None
+        if segment == "largest_climb":
+            climbs = [
+                samples.segment_metrics(reference, span)
+                for span in samples.DistanceSegmenter(threshold).split(reference)
+                if span.kind == "climb"
+            ]
+            if not climbs:
+                raise GarminOwlInputError(
+                    f"The reference activity has no climb of at least {threshold:g} m; lower "
+                    "min_climb_m or give a distance_window."
+                )
+            largest = max(climbs, key=lambda climb: climb.elevation_gain_m or 0.0)
+            start = largest.start_distance_m or 0.0
+            end = largest.end_distance_m or 0.0
+        else:
+            assert start_distance_m is not None and end_distance_m is not None
+            start, end = float(start_distance_m), float(end_distance_m)
+        result.reference_start_distance_m = samples._round(start)
+        result.reference_end_distance_m = samples._round(end)
+        if end - start < samples.MIN_MATCH_WINDOW_M:
+            raise GarminOwlInputError(
+                f"The selected climb is shorter than {samples.MIN_MATCH_WINDOW_M:g} m; give a "
+                "longer distance_window."
+            )
+
+        stopped: GarminOwlError | None = None
+        for activity_id in activity_ids:
+            if stopped is not None:
+                result.unmatched.append(
+                    UnmatchedActivity(
+                        activity_id=activity_id,
+                        status=_FAILURE_STATUS.get(type(stopped), RETRIEVAL_FAILED),
+                        reason=f"Not read: {stopped} Call again later.",
+                    )
+                )
+                continue
+            try:
+                item = (
+                    reference_item
+                    if activity_id == reference_id
+                    else self._activity_samples(activity_id)
+                )
+            except GarminOwlAuthError:
+                raise
+            except GarminOwlMissingDataError:
+                result.unmatched.append(
+                    UnmatchedActivity(
+                        activity_id=activity_id,
+                        status=MISSING_OR_UNSUPPORTED,
+                        reason="Garmin has no per-sample data for this activity.",
+                    )
+                )
+                continue
+            except GarminOwlError as exc:
+                # A rate limit or outage would fail every remaining read too.
+                stopped = exc
+                result.unmatched.append(
+                    UnmatchedActivity(
+                        activity_id=activity_id,
+                        status=_FAILURE_STATUS.get(type(exc), RETRIEVAL_FAILED),
+                        reason=f"{exc} Call again later.",
+                    )
+                )
+                continue
+            analysis = reference if activity_id == reference_id else samples.analyse(item.series)
+            unusable = samples.DistanceSegmenter(threshold).unavailable_reason(analysis)
+            if unusable is not None or analysis.profile is None:
+                result.unmatched.append(
+                    UnmatchedActivity(
+                        activity_id=activity_id,
+                        status="not_matchable",
+                        reason=f"Cannot be matched without GPS: {unusable or 'no profile'}.",
+                    )
+                )
+                continue
+            if activity_id == reference_id:
+                match: samples.WindowMatch | str = samples.WindowMatch(
+                    start, end, "reference", offset_m=0.0, scale=1.0
+                )
+            else:
+                match = samples.match_window(reference.profile, start, end, analysis.profile)
+            if isinstance(match, str):
+                result.unmatched.append(
+                    UnmatchedActivity(activity_id=activity_id, status="no_match", reason=match)
+                )
+                continue
+            span = samples.span_for_window(analysis, match.start_m, match.end_m)
+            if span is None:
+                result.unmatched.append(
+                    UnmatchedActivity(
+                        activity_id=activity_id,
+                        status="no_match",
+                        reason="no samples inside the matched distance window",
+                    )
+                )
+                continue
+            result.matched.append(
+                SegmentMatch(
+                    activity_id=activity_id,
+                    start_time=item.start_time,
+                    reference=activity_id == reference_id,
+                    match_method=match.method,
+                    match_confidence=match.confidence,
+                    profile_correlation=match.correlation,
+                    elevation_range_ratio=match.range_ratio,
+                    distance_offset_m=match.offset_m,
+                    length_scale=match.scale,
+                    segment=samples.segment_metrics(analysis, span),
+                )
+            )
+        result.availability.append(
+            derived_notice(
+                "match_confidence",
+                "the reference window's smoothed elevation, sampled every "
+                f"{samples.PROFILE_STEP_M:g} m, is compared with windows shifted by up to "
+                f"±{samples.MATCH_SEARCH_M:g} m and stretched by ±6 % in each activity; "
+                "confidence = max(0, correlation) x elevation-range ratio, and matches below "
+                f"{samples.MIN_MATCH_CONFIDENCE:g} are rejected. No GPS is used.",
+            )
+        )
+        return result.compact()
 
     def get_training_context(self, date: str | None = None) -> dict[str, Any]:
         target = parse_date(date)

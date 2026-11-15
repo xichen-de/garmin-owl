@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "garmin-owl",
   "display_name": "Garmin Owl",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Local-only, read-only access to your Garmin Connect health and activity data.",
   "long_description": "Garmin Owl runs entirely as a local stdio MCP server. It reads your existing Garmin Connect data on demand through the unofficial python-garminconnect client. It has no write tools, public listener, telemetry, analytics, remote database, or bundled credentials. Garmin session tokens remain in the standard local ~/.garminconnect store.",
   "author": {
@@ -94,6 +94,18 @@
     {
       "name": "compare_activities",
       "description": "Compare 2-10 activities using concise normalized metrics, disclosing how many reported each one."
+    },
+    {
+      "name": "get_activity_timeseries",
+      "description": "On-demand only: one activity's resampled per-sample HR, pace, cadence, elevation, grade and respiration, for detailed analysis of that session. No GPS."
+    },
+    {
+      "name": "get_activity_segments",
+      "description": "On-demand only: split one activity into climbs, flats and descents with HR lag, recovery, pace, cadence and cardiac drift. No GPS."
+    },
+    {
+      "name": "compare_activity_segments",
+      "description": "On-demand only: match the same climb across 2-10 activities by distance and elevation shape (no GPS) and compare HR and pace on it."
     },
     {
       "name": "get_cycle",
