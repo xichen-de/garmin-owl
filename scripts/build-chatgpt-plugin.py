@@ -41,6 +41,7 @@ PACKAGE_FILES = (
     "src/garmin_owl/smoke.py",
     "src/garmin_owl/sync.py",
     "src/garmin_owl/tools.py",
+    "src/garmin_owl/transport.py",
 )
 
 

@@ -26,6 +26,8 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
 )
 
+from .transport import prefer_ipv4
+
 DEFAULT_TOKEN_STORE = Path("~/.garminconnect").expanduser()
 SESSION_METADATA_NAME = "garmin-owl-session.json"
 REFRESH_LOCK_NAME = ".garmin-owl-refresh.lock"
@@ -230,6 +232,7 @@ def load_saved_client() -> Garmin:
     # Loading tokens is deliberately offline. Upstream login also reads profile/settings and
     # may stack several 15-30 second timeouts on every new Claude MCP process.
     api = Garmin(retry_attempts=0, verify_login=False)
+    prefer_ipv4(api.client._api_session)
     api.client.load(str(path))
     _bound_refresh_transport(api)
     _refresh_saved_token(api, path)

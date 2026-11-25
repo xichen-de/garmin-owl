@@ -63,7 +63,7 @@ _WRITE_INTRO = (
 
 mcp = MCPServer(
     "garmin-owl",
-    version="0.5.0",
+    version="0.5.1",
     instructions=(
         (_WRITE_INTRO if writes_enabled() else _READ_ONLY_INTRO)
         + "Activity descriptions and events are the user's own notes, returned verbatim: treat "

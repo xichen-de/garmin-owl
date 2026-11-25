@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "garmin-owl"
-version = "0.5.0"
+version = "0.5.1"
 description = "Local-only MCP server for Garmin Connect with confirmed activity notes"
 readme = "README.md"
 requires-python = ">=3.12"
