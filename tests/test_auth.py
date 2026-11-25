@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
+import requests
 from garminconnect import GarminConnectConnectionError
 
 import garmin_owl.auth as auth
+from garmin_owl.transport import IPv4FirstAdapter
 
 
 def _token(expiry: float) -> str:
@@ -26,6 +28,7 @@ class FakeClient:
         self.loads = 0
         self.refreshes = 0
         self.dumps = 0
+        self._api_session = requests.Session()
         self._http_post = lambda url, **kwargs: None
 
     def load(self, path: str) -> None:
@@ -91,6 +94,8 @@ def test_saved_client_starts_offline_with_cached_session_metadata(
     api = auth.load_saved_client()
 
     assert api.display_name == "cached-user"
+    adapter = FakeGarmin.clients[0]._api_session.get_adapter("https://connectapi.garmin.com/")
+    assert isinstance(adapter, IPv4FirstAdapter)
     assert FakeGarmin.profile_calls == 0
     assert FakeGarmin.clients[0].refreshes == 0
 

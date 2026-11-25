@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- Connect to Garmin over IPv4 first, with IPv6 as fallback. On networks with broken IPv6, starting up and parallel reads could stall for over a minute and time out.
+
 ## 0.5.0
 
 - Add `preview_activity_note` and `commit_activity_note`: add to or replace the description of one existing activity after a confirmed preview. No other field can be changed.

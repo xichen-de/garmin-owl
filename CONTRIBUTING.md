@@ -56,6 +56,7 @@ models.py      Pydantic output models; OwlModel.compact() drops empty fields for
 notices.py     shared AvailabilityNotice builders, used by both live reads and cache hits
    │
 client.py      GarminDataClient: the explicit allow-list of Garmin reads and error translation
+transport.py   prefers IPv4 for Garmin connections, with IPv6 as fallback
 auth.py        token loading/refresh and the interactive login; the only code that sees credentials
 ```
 
