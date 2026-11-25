@@ -15,7 +15,7 @@ Details behind the [README](../README.md): every tool, date limits, how answers 
 
 ## Tools
 
-Your assistant chooses among 27 read-only tools. None of them can change anything in your Garmin account.
+Your assistant chooses among 29 tools. All are read-only except `commit_activity_note`, which can change only the description of one existing activity.
 
 **One day at a time**
 
@@ -42,6 +42,15 @@ Your assistant chooses among 27 read-only tools. None of them can change anythin
 | `get_training_load` | Acute/chronic load, ratio/status, load focus/targets, VO2 max, endurance, hill, acclimation |
 | `get_training_zones` | Today's configured HR and cycling-power zone thresholds (Garmin keeps no history; see `hr_zone_floors_bpm` on activities) |
 | `get_running_tolerance` | Running distance, impact load, tolerance, and feedback over 1–90 days |
+
+**Activity notes** ([how it works](../README.md#writing-activity-notes-optional))
+
+| Tool | Answers |
+| --- | --- |
+| `preview_activity_note` | Shows the current and resulting description, and a token for the commit; writes nothing |
+| `commit_activity_note` | **Writes** the confirmed note to that activity's description and reads it back |
+
+Set `GARMIN_OWL_ENABLE_WRITES=0` to remove both; any value other than `1`, `true`, `yes`, or `on` also turns them off. `GARMIN_OWL_NOTES_LOG` moves the audit log. Notes hold at most 2,000 characters; most emoji count as two. An edit made elsewhere in the instant between the last check and the write can be overwritten, because Garmin offers no version check.
 
 **One activity in detail (on demand only)**
 
@@ -251,7 +260,7 @@ The cache upgrades itself when needed. Your saved sign-in carries over.
 ## Privacy in detail
 
 - Everything runs locally and talks to your MCP client only over local stdio. There is no network listener, telemetry, or remote database.
-- Garmin access is read-only. `garmin-owl` has no tool that can change your account.
+- Garmin access is read-only except for `commit_activity_note`, which changes only an activity's description and can be turned off. Its local audit log (`~/.garmin-owl/activity-notes-log.jsonl`, owner-only) keeps old and new notes as plain text until you delete it.
 - Tokens stay in `~/.garminconnect`. Only normalized data, including your activity notes, is stored in the local cache, never raw Garmin responses.
 - Your events file is read-only for `garmin-owl`, and exports are written only into its own `exports` folder with owner-only permissions.
 - Device information excludes serial numbers, unit IDs and device nicknames.

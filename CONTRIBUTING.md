@@ -48,6 +48,7 @@ tools.py       GarminTools: input validation, cache-or-fetch, combining reads, a
    ├── events.py     the user's read-only events.toml, attached to long-range answers
    ├── activity_series.py  on-demand per-sample analysis of one activity (time series,
    │                 segments, matching); reads only allow-listed, non-location chart columns
+   ├── notes.py      the only write: preview/commit of one activity description, with audit log
    ├── database.py   GarminDatabase: SQLite schema, migrations, freshness rules, typed get/put
    │
 normalize.py   raw Garmin JSON → models, defensively (every key optional, alternate key names)
@@ -73,7 +74,7 @@ Command-line entry points (see `[project.scripts]` in `pyproject.toml`):
 
 These are the project's guarantees to users. A change that breaks one of them needs a very good reason and an explicit discussion in the pull request.
 
-1. **Read-only by construction.** Garmin is reached only through the methods listed in `GarminReadAPI` and wrapped in `GarminDataClient`. Don't add generic request helpers or any method that writes. The `test_server` test pins the exact set of registered tools.
+1. **Read-only by construction, with one exception.** `notes.py` may set the description of one existing activity through `ActivityNoteWriter`, only after a preview token check, an audit record, and with a read-back; `GARMIN_OWL_ENABLE_WRITES=0` unregisters it. Otherwise Garmin is reached only through the methods listed in `GarminReadAPI` and wrapped in `GarminDataClient`. Don't add generic request helpers or any other method that writes. The `test_server` test pins the exact set of registered tools.
 2. **No raw data at rest or in output.** Only explicit, normalized scalar fields go into models and the SQLite cache. Raw responses, credentials, account identifiers, GPS tracks, and cycle notes/symptoms never do.
 3. **Missing is not zero.** An absent value stays `None`. Totals sum only the values that are present and report how many that was (see `_sum_present`).
 4. **Explain every gap.** When a value is absent, add an `AvailabilityNotice` that says why: `missing_or_unsupported`, `retrieval_failed`, `retrieval_failed_rate_limited`, and so on. Anything `garmin-owl` calculates, rather than Garmin reporting it, gets a `derived_notice` with its formula.
