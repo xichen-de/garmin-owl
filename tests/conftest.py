@@ -29,3 +29,13 @@ def no_user_events(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
         os.environ.pop("GARMIN_OWL_EVENTS", None)
     else:
         os.environ["GARMIN_OWL_EVENTS"] = previous
+
+
+@pytest.fixture(autouse=True)
+def isolated_note_log(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never touch the developer's own audit log, and test with the default write setting."""
+    path = tmp_path_factory.mktemp("notes") / "activity-notes-log.jsonl"
+    monkeypatch.setenv("GARMIN_OWL_NOTES_LOG", str(path))
+    monkeypatch.delenv("GARMIN_OWL_ENABLE_WRITES", raising=False)

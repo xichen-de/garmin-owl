@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "garmin-owl",
-  "version": "0.4.0",
-  "description": "Local, read-only access to Garmin health and training data.",
+  "version": "0.5.0",
+  "description": "Local access to Garmin health and training data, with confirmed activity notes.",
   "author": { "name": "garmin-owl contributors" },
   "repository": "https://github.com/xichen-de/garmin-owl",
   "license": "MIT",
@@ -11,10 +11,10 @@
       "interface": {
         "displayName": "Garmin Owl",
         "shortDescription": "Local Garmin health data",
-        "longDescription": "Read your Garmin health and training data through a local, read-only stdio MCP server. Garmin session tokens and the normalized SQLite cache stay on your computer. No network listener, telemetry, remote database, or bundled credentials.",
+        "longDescription": "Read your Garmin health and training data through a local stdio MCP server. Its only write tool, commit_activity_note, changes the description of one existing activity after a preview you confirm. Garmin session tokens and the normalized SQLite cache stay on your computer. No network listener, telemetry, remote database, or bundled credentials.",
         "developerName": "garmin-owl contributors",
         "category": "Productivity",
-        "capabilities": ["Read"],
+        "capabilities": ["Read", "Write"],
         "defaultPrompt": [
           "Summarize my recovery today.",
           "How did I sleep last night?",

@@ -8,7 +8,7 @@ from mcp import Client
 from garmin_owl.server import mcp
 
 
-def test_server_registers_only_the_intended_read_tools() -> None:
+def test_server_registers_only_the_intended_tools() -> None:
     async def names() -> set[str]:
         # In-memory MCP still performs protocol initialization and schema exchange.
         async with Client(mcp) as client:
@@ -43,6 +43,8 @@ def test_server_registers_only_the_intended_read_tools() -> None:
         "get_activity_timeseries",
         "get_activity_segments",
         "compare_activity_segments",
+        "preview_activity_note",
+        "commit_activity_note",
     }
 
 
@@ -74,8 +76,9 @@ def test_exported_tool_metadata_is_complete_without_authentication(
             by_name = {tool.name: tool for tool in result.tools}
             for tool in result.tools:
                 assert tool.annotations is not None, tool.name
-                assert tool.annotations.read_only_hint is True, tool.name
-                assert tool.annotations.destructive_hint is False, tool.name
+                writes = tool.name == "commit_activity_note"
+                assert tool.annotations.read_only_hint is not writes, tool.name
+                assert tool.annotations.destructive_hint is writes, tool.name
                 assert tool.annotations.open_world_hint is True, tool.name
                 assert tool.description and "garmin-owl-auth" in tool.description, tool.name
                 for name, schema in tool.input_schema.get("properties", {}).items():
@@ -128,6 +131,8 @@ def test_typed_outputs_preserve_service_payloads(
         async with Client(mcp) as client:
             definitions = await client.list_tools()
             for tool in definitions.tools:
+                if tool.name in ("preview_activity_note", "commit_activity_note"):
+                    continue  # covered end to end in test_notes.py
                 properties = tool.input_schema.get("properties", {})
                 arguments: dict[str, Any] = {
                     key: DATE for key in ("date", "start_date", "end_date") if key in properties

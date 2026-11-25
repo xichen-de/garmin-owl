@@ -77,6 +77,7 @@ from .normalize import (
     normalize_training_readiness,
     normalize_training_zones,
 )
+from .notes import ActivityNotes, NoteMode
 from .notices import (
     MISSING_OR_UNSUPPORTED,
     NOT_RECORDED,
@@ -282,6 +283,22 @@ class GarminTools:
             database if database is not None else (GarminDatabase() if client is None else None)
         )
         self.sync = SyncEngine(self.client, self.database) if self.database is not None else None
+
+        self.notes = ActivityNotes(self.client, self.database)
+
+    def preview_activity_note(
+        self, activity_id: int, text: str, mode: NoteMode = "append"
+    ) -> dict[str, Any]:
+        return self.notes.preview(activity_id, text, mode)
+
+    def commit_activity_note(
+        self,
+        activity_id: int,
+        text: str,
+        confirmation_token: str,
+        mode: NoteMode = "append",
+    ) -> dict[str, Any]:
+        return self.notes.commit(activity_id, text, confirmation_token, mode)
 
     @property
     def export_dir(self) -> Path:

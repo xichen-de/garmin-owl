@@ -1,4 +1,4 @@
-"""Narrow read-only facade around ``python-garminconnect``."""
+"""Narrow facade around ``python-garminconnect``: allow-listed reads and one note write."""
 
 from __future__ import annotations
 
@@ -54,6 +54,12 @@ class GarminReadAPI(Protocol):
     def get_running_tolerance(self, startdate: str, enddate: str, aggregation: str) -> Any: ...
     def get_menstrual_data_for_date(self, fordate: str) -> dict[str, Any]: ...
     def get_menstrual_calendar_data(self, startdate: str, enddate: str) -> dict[str, Any]: ...
+
+
+class GarminNoteWriteAPI(Protocol):
+    """The one upstream method this project may call to change anything."""
+
+    def set_activity_description(self, activity_id: str, description: str) -> Any: ...
 
 
 class GarminOwlError(RuntimeError):
@@ -190,13 +196,51 @@ def _safe_call[T](call: Callable[[], T]) -> T:
         raise _connection_error(exc) from None
 
 
+def _safe_write[T](call: Callable[[], T]) -> T:
+    """Like ``_safe_call`` for upstream's PUT, which skips its own error translation."""
+
+    def translated() -> T:
+        try:
+            return call()
+        except GarminConnectConnectionError as exc:
+            status = _status_code(exc)
+            if status == 401:
+                raise GarminConnectAuthenticationError("rejected") from None
+            if status == 429:
+                raise GarminConnectTooManyRequestsError("rate limited") from None
+            if status is not None and 400 <= status < 500:
+                raise GarminOwlRequestError(
+                    f"Garmin rejected this update (HTTP {status}); retrying it unchanged will "
+                    "not help."
+                ) from None
+            raise
+
+    return _safe_call(translated)
+
+
+class ActivityNoteWriter:
+    """Sets one activity's description; holds no other write access."""
+
+    def __init__(self, api: GarminNoteWriteAPI) -> None:
+        self.__api = api
+
+    def set_description(self, activity_id: int, description: str) -> None:
+        _safe_write(lambda: self.__api.set_activity_description(str(activity_id), description))
+
+
 class GarminDataClient:
-    """Explicit allow-list of Garmin reads; no generic request or mutation access."""
+    """Explicit allow-list of Garmin reads; no generic request or mutation access.
+
+    ``note_writer`` hands out the one, separate write path. It shares this client's session so
+    two clients never rotate the same refresh token.
+    """
 
     def __init__(self, api: GarminReadAPI | None = None) -> None:
         self.__api: GarminReadAPI = api if api is not None else _safe_call(load_saved_client)
         self.__calls: Counter[str] = Counter()
         self.cache_identity: str | None = None
+        # Kept in memory only, to confirm an activity is the user's own before a note write.
+        self.profile_id: int | None = None
         if api is None:
             # Resolve identity from the authenticated service, not the cached profile sidecar.
             profile = _safe_call(
@@ -207,6 +251,8 @@ class GarminDataClient:
             identity = profile.get("displayName") if isinstance(profile, dict) else None
             if not isinstance(identity, str) or not identity.strip():
                 raise GarminOwlAuthError("Cannot establish Garmin account identity for the cache.")
+            profile_id = profile.get("profileId")
+            self.profile_id = profile_id if isinstance(profile_id, int) else None
             # Reads must use the same authenticated profile as the cache binding, even
             # when the local session sidecar still describes a previous sign-in.
             self.__api.display_name = identity  # type: ignore[union-attr]
@@ -215,6 +261,21 @@ class GarminDataClient:
     def _read[T](self, endpoint: str, call: Callable[[], T]) -> T:
         self.__calls[endpoint] += 1
         return _safe_call(call)
+
+    def note_writer(self) -> ActivityNoteWriter:
+        self.__calls["activity note update"] += 1
+        return ActivityNoteWriter(self.__api)  # type: ignore[arg-type]
+
+    @staticmethod
+    def is_definite_refusal(error: GarminOwlError) -> bool:
+        """Whether Garmin answered that it did not apply the request."""
+        return isinstance(
+            error,
+            GarminOwlAuthError
+            | GarminOwlRateLimitError
+            | GarminOwlRequestError
+            | GarminOwlMissingDataError,
+        )
 
     def request_counts(self) -> dict[str, int]:
         return dict(sorted(self.__calls.items()))

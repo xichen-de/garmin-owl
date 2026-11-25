@@ -1117,6 +1117,19 @@ class GarminDatabase:
                 )
         return existed is None
 
+    def invalidate_activity_note(self, activity_id: int, description: str | None) -> None:
+        """Drop cached copies of a note that was just written.
+
+        ``description`` is what Garmin now holds, or None when that is unknown. Detail and
+        listings are re-read from Garmin on the next request.
+        """
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE activities SET description=?, detail_fetched_at=NULL WHERE activity_id=?",
+                (description or None, activity_id),
+            )
+            connection.execute("DELETE FROM sync_state WHERE resource='activities'")
+
     def put_activity_detail(self, item: ActivityDetail, *, now: datetime | None = None) -> bool:
         inserted = self.put_activity_summary(item.summary, now=now)
         stamp = _timestamp(now)
