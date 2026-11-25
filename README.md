@@ -3,7 +3,7 @@
 Ask Claude (or ChatGPT) about your Garmin data: sleep, HRV, recovery, workouts, training load, and long-term trends.
 
 - **Private:** runs on your computer. There is no server or account in between.
-- **Read-only:** it can't change anything in your Garmin account.
+- **Careful:** it only reads, with one exception: it can write an activity's notes after you confirm a preview. [You can turn that off](#writing-activity-notes-optional).
 - **Honest:** when Garmin has no value, it says so instead of guessing.
 
 Works on macOS and Ubuntu Linux.
@@ -71,6 +71,20 @@ label = "Flu"
 ```
 
 Long-range answers include the events from the period they cover. garmin-owl only reads this file.
+
+## Writing activity notes (optional)
+
+Tell the assistant what you trained and ask it to add that to the activity, for example "Add to today's workout: bench 5×5 at 27.5 kg". Then:
+
+1. **Preview:** it shows the activity, its current description, and the resulting one (`preview_activity_note`, writes nothing).
+2. **Confirm:** you say yes.
+3. **Commit:** garmin-owl writes the note and reads it back to check it (`commit_activity_note`, the only tool that writes).
+
+It can add to or replace the description of one existing activity of yours, up to 2,000 characters in total. It can't change any other field or any health data, and can't create or delete activities. If the description changed after the preview, the write is refused.
+
+Every write first saves the old and new description in `~/.garmin-owl/activity-notes-log.jsonl`, so you can restore an earlier note by hand.
+
+**Turning it off:** writing is on by default. In Claude Desktop, switch off **Allow writing activity notes** in the extension's settings. In other apps, set `GARMIN_OWL_ENABLE_WRITES=0` in the server's `env`. Restart afterwards; the note tools are then not available at all.
 
 ## Updating
 

@@ -35,7 +35,7 @@ def test_openai_metadata_and_shared_version() -> None:
     interface = plugin["extensions"]["com.openai"]["interface"]
     assert interface["displayName"] == "Garmin Owl"
     assert len(interface["shortDescription"]) <= 30
-    assert interface["capabilities"] == ["Read"]
+    assert interface["capabilities"] == ["Read", "Write"]
     assert len(interface["defaultPrompt"]) <= 3
 
 

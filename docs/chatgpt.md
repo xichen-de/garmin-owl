@@ -60,3 +60,7 @@ ChatGPT runs its own installed copy of the plugin, so after `git pull`:
 - **"uv was not found":** desktop apps often don't inherit your shell's `PATH`. The launcher looks for `uv` on `PATH` and in `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, `/home/linuxbrew/.linuxbrew/bin`, `/usr/local/bin`, `/usr/bin`, and `/snap/bin`. Install `uv` with its [official installer](https://docs.astral.sh/uv/getting-started/installation/) (or `brew install uv` on macOS), or link a custom install into `~/.local/bin` (`ln -s "$(command -v uv)" ~/.local/bin/uv`), then restart ChatGPT.
 - **Garmin Owl Local isn't listed:** check `codex plugin marketplace list`, restart ChatGPT, and confirm your build and account support local marketplaces and stdio plugins.
 - **Old behaviour after updating:** reinstall the plugin as described in [Updating the ChatGPT plugin](#updating-the-chatgpt-plugin).
+
+## Activity notes
+
+The plugin can write an activity's notes after you confirm a preview ([details](../README.md#writing-activity-notes-optional)). For a read-only plugin, add `"GARMIN_OWL_ENABLE_WRITES": "0"` to `env` in `mcp.json`, then rebuild and update the plugin.
